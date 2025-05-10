@@ -15,6 +15,7 @@ interface LoanFormData {
   duration: string;
   purpose: string;
   disbursementDate: string;
+  installmentAmount: string;
 }
 
 interface LoanFormErrors {
@@ -27,6 +28,7 @@ interface LoanFormErrors {
   duration?: string;
   purpose?: string;
   disbursementDate?: string;
+  installmentAmount?: string;
 }
 
 interface LoanType {
@@ -42,32 +44,69 @@ export default function NewLoanPage() {
   const [formData, setFormData] = useState<LoanFormData>({
     borrowerName: '',
     contact: '',
-    loanType: 'Personal',
+    loanType: 'Monthly',
     amount: '',
     interestRate: '',
     documentCharge: '0',
     duration: '',
     purpose: '',
     disbursementDate: today,
+    installmentAmount: '0',
   });
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [errors, setErrors] = useState<LoanFormErrors>({});
 
   const loanTypes: LoanType[] = [
-    { value: 'Personal', label: 'Personal Loan' },
-    { value: 'Business', label: 'Business Loan' },
-    { value: 'Education', label: 'Education Loan' },
-    { value: 'Home Improvement', label: 'Home Improvement Loan' },
-    { value: 'Medical', label: 'Medical Loan' },
-    { value: 'Agriculture', label: 'Agriculture Loan' },
+    { value: 'Monthly', label: 'Monthly' },
+    { value: 'Weekly', label: 'Weekly' },
   ];
 
   const handleChange = (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
-    setFormData({
+    const updatedFormData = {
       ...formData,
       [name]: value,
-    });
+    };
+
+    // Recalculate installment amount when loan type changes
+    if (name === 'loanType') {
+      // Reset duration to a reasonable default when switching between weekly and monthly
+      if (value === 'Weekly') {
+        // If switching to weekly, multiply current duration by ~4.3 (weeks in a month)
+        const currentDuration = parseInt(updatedFormData.duration) || 0;
+        if (currentDuration > 0 && currentDuration <= 60) { // Only convert if it's a reasonable monthly value
+          updatedFormData.duration = Math.round(currentDuration * 4.3).toString();
+        } else {
+          updatedFormData.duration = '4'; // Default to 4 weeks if no valid duration
+        }
+      } else {
+        // If switching to monthly, divide current duration by ~4.3
+        const currentDuration = parseInt(updatedFormData.duration) || 0;
+        if (currentDuration > 4 && currentDuration <= 260) { // Only convert if it's a reasonable weekly value
+          updatedFormData.duration = Math.round(currentDuration / 4.3).toString();
+        } else {
+          updatedFormData.duration = '1'; // Default to 1 month if no valid duration
+        }
+      }
+    }
+
+    // Calculate installment amount when amount, interest, duration, or loan type changes
+    if (name === 'amount' || name === 'interestRate' || name === 'duration' || name === 'loanType') {
+      const amount = parseFloat(updatedFormData.amount) || 0;
+      const interestAmount = parseFloat(updatedFormData.interestRate) || 0;
+      const duration = parseInt(updatedFormData.duration) || 1;
+
+      // Calculate total amount to be repaid (principal + interest)
+      const totalAmount = amount + interestAmount;
+
+      // Calculate installment amount
+      const installmentAmount = totalAmount / duration;
+
+      // Update the installment amount field
+      updatedFormData.installmentAmount = installmentAmount.toFixed(2);
+    }
+
+    setFormData(updatedFormData);
   };
 
   const validateForm = (): boolean => {
@@ -101,8 +140,12 @@ export default function NewLoanPage() {
 
     if (!formData.duration) {
       newErrors.duration = 'Loan duration is required';
-    } else if (isNaN(Number(formData.duration)) || Number(formData.duration) <= 0 || Number(formData.duration) > 60) {
-      newErrors.duration = 'Please enter a valid duration (1-60 months)';
+    } else if (isNaN(Number(formData.duration)) || Number(formData.duration) <= 0) {
+      newErrors.duration = 'Please enter a valid duration greater than 0';
+    } else if (formData.loanType === 'Monthly' && Number(formData.duration) > 60) {
+      newErrors.duration = 'Monthly duration cannot exceed 60 months (5 years)';
+    } else if (formData.loanType === 'Weekly' && Number(formData.duration) > 260) {
+      newErrors.duration = 'Weekly duration cannot exceed 260 weeks (5 years)';
     }
 
     if (!formData.purpose.trim()) {
@@ -146,15 +189,16 @@ export default function NewLoanPage() {
         nextPaymentDate: nextPaymentDateISOString
       });
 
-      // Create loan data without the problematic fields
+      // Create loan data with all fields
       const loanData = {
         borrowerName: formData.borrowerName,
         contact: formData.contact,
         loanType: formData.loanType,
         amount: formData.amount,
         interestRate: formData.interestRate,
-        // Removed documentCharge and currentMonth as they're causing issues
+        documentCharge: formData.documentCharge,
         duration: formData.duration,
+        installmentAmount: formData.installmentAmount,
         purpose: formData.purpose,
         disbursementDate: disbursementDateISOString,
         repaymentType: 'Monthly',
@@ -345,7 +389,7 @@ export default function NewLoanPage() {
 
             <div>
               <label htmlFor="duration" className="block text-sm font-medium text-gray-700 mb-1">
-                Duration (months) <span className="text-red-500">*</span>
+                Duration ({formData.loanType === 'Weekly' ? 'weeks' : 'months'}) <span className="text-red-500">*</span>
               </label>
               <input
                 type="number"
@@ -354,7 +398,7 @@ export default function NewLoanPage() {
                 value={formData.duration}
                 onChange={handleChange}
                 min="1"
-                max="60"
+                max={formData.loanType === 'Weekly' ? '260' : '60'} // 5 years in weeks or months
                 className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent ${
                   errors.duration ? 'border-red-500' : 'border-gray-300'
                 }`}
@@ -362,6 +406,21 @@ export default function NewLoanPage() {
               {errors.duration && (
                 <p className="mt-1 text-sm text-red-500">{errors.duration}</p>
               )}
+            </div>
+
+            <div>
+              <label htmlFor="installmentAmount" className="block text-sm font-medium text-gray-700 mb-1">
+                Installment Amount (₹)
+              </label>
+              <input
+                type="number"
+                id="installmentAmount"
+                name="installmentAmount"
+                value={formData.installmentAmount}
+                readOnly
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-50"
+              />
+              <p className="mt-1 text-xs text-gray-500">Automatically calculated based on loan amount, interest, and duration</p>
             </div>
 
             <div>
