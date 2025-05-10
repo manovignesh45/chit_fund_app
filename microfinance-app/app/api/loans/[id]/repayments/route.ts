@@ -227,8 +227,8 @@ export async function DELETE(
 
             // Calculate amount to add back to remaining amount (only for full payments)
             const amountToAddBack = repayments
-                .filter(r => r.paymentType === 'full')
-                .reduce((sum, r) => sum + r.amount, 0);
+                .filter((r: any) => r.paymentType === 'full')
+                .reduce((sum: number, r: any) => sum + r.amount, 0);
 
             // Use a transaction to ensure both operations succeed or fail together
             await prismaAny.$transaction([
