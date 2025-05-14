@@ -49,9 +49,6 @@ export default function EditLoanPage() {
   const id = params.id;
   const router = useRouter();
 
-  // Convert id to number for Prisma
-  const numericId = typeof id === 'string' ? parseInt(id, 10) : id;
-
   const [formData, setFormData] = useState<LoanFormData>({
     borrowerName: '',
     contact: '',
@@ -86,8 +83,19 @@ export default function EditLoanPage() {
     const fetchLoanData = async () => {
       try {
         setLoading(true);
-        console.log(`Fetching loan data for ID: ${numericId}`);
+        console.log(`Fetching loan data for ID: ${id}`);
 
+        if (!id) {
+          throw new Error('Invalid loan ID');
+        }
+
+        // Convert id to number for API call
+        const numericId = typeof id === 'string' ? parseInt(id, 10) : Array.isArray(id) ? parseInt(id[0], 10) : 0;
+        
+        if (!numericId) {
+          throw new Error('Invalid loan ID');
+        }
+        
         // Use the API client to fetch loan data
         const loanData = await loanAPI.getById(numericId);
         console.log('Loan data fetched successfully:', loanData);
@@ -120,10 +128,10 @@ export default function EditLoanPage() {
       }
     };
 
-    if (numericId) {
+    if (id) {
       fetchLoanData();
     }
-  }, [numericId]);
+  }, [id]);
 
   const handleChange = (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
@@ -249,6 +257,13 @@ export default function EditLoanPage() {
     setIsSubmitting(true);
 
     try {
+      // Convert id to number for API call
+      const numericId = typeof id === 'string' ? parseInt(id, 10) : Array.isArray(id) ? parseInt(id[0], 10) : 0;
+      
+      if (!numericId) {
+        throw new Error('Invalid loan ID');
+      }
+      
       // Prepare the data for API submission
       const loanData = {
         id: numericId, // Use the numeric ID for Prisma
