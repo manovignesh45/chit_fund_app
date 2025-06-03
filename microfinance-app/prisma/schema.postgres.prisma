@@ -1,0 +1,162 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            Int            @id @default(autoincrement())
+  name          String
+  email         String         @unique
+  password      String
+  role          String         @default("user")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  chitFunds     ChitFund[]
+  globalMembers GlobalMember[]
+  loans         Loan[]
+}
+
+model GlobalMember {
+  id              Int      @id @default(autoincrement())
+  name            String
+  contact         String
+  email           String?
+  address         String?
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  createdById     Int
+  createdBy       User     @relation(fields: [createdById], references: [id])
+  loans           Loan[]   @relation("BorrowerToLoan")
+  chitFundMembers ChitFundMember[]
+}
+
+model ChitFund {
+  id                     Int                   @id @default(autoincrement())
+  name                   String
+  totalAmount            Float
+  monthlyContribution    Float
+  duration               Int
+  membersCount           Int
+  status                 String                @default("Active")
+  startDate              DateTime
+  currentMonth           Int                   @default(1)
+  nextAuctionDate        DateTime?
+  description            String?
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  createdById            Int
+  chitFundType           String                @default("Auction")
+  firstMonthContribution Float?
+  auctions               Auction[]
+  createdBy              User                  @relation(fields: [createdById], references: [id])
+  fixedAmounts           ChitFundFixedAmount[]
+  contributions          Contribution[]
+  members                ChitFundMember[]
+
+  @@index([createdById])
+}
+
+model ChitFundMember {
+  id            Int      @id @default(autoincrement())
+  globalMemberId Int
+  chitFundId    Int
+  joinDate      DateTime
+  auctionWon    Boolean  @default(false)
+  auctionMonth  Int?
+  contribution  Float
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  globalMember  GlobalMember @relation(fields: [globalMemberId], references: [id])
+  chitFund      ChitFund     @relation(fields: [chitFundId], references: [id])
+  contributions Contribution[]
+}
+
+model Contribution {
+  id                    Int      @id @default(autoincrement())
+  amount                Float
+  month                 Int
+  paidDate              DateTime
+  memberId              Int
+  chitFundId            Int
+  balance               Float
+  balancePaymentDate    DateTime?
+  balancePaymentStatus  String?
+  actualBalancePaymentDate DateTime?
+  notes                 String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  member                ChitFundMember @relation(fields: [memberId], references: [id])
+  chitFund              ChitFund       @relation(fields: [chitFundId], references: [id])
+}
+
+model Auction {
+  id         Int      @id @default(autoincrement())
+  amount     Float
+  date       DateTime
+  month      Int
+  chitFundId Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  chitFund   ChitFund @relation(fields: [chitFundId], references: [id])
+}
+
+model ChitFundFixedAmount {
+  id         Int      @id @default(autoincrement())
+  chitFundId Int
+  month      Int
+  amount     Float
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  chitFund   ChitFund @relation(fields: [chitFundId], references: [id])
+}
+
+model Loan {
+  id               Int      @id @default(autoincrement())
+  borrowerId       Int
+  loanType         String
+  amount           Float
+  interestRate     Float
+  documentCharge   Float
+  installmentAmount Float
+  duration         Int
+  disbursementDate DateTime
+  repaymentType    String
+  remainingAmount  Float
+  status           String   @default("Active")
+  purpose          String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  createdById      Int
+  nextPaymentDate  DateTime?
+  borrower         GlobalMember @relation("BorrowerToLoan", fields: [borrowerId], references: [id])
+  createdBy        User         @relation(fields: [createdById], references: [id])
+  repayments       Repayment[]
+}
+
+model Repayment {
+  id         Int      @id @default(autoincrement())
+  loanId     Int
+  amount     Float
+  paymentType String?
+  paidDate   DateTime
+  period     Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  loan       Loan     @relation(fields: [loanId], references: [id])
+}
+
+model EmailLog {
+  id         Int      @id @default(autoincrement())
+  emailType  String
+  sentDate   DateTime
+  recipients String
+  status     String
+  error      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
