@@ -1,10 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '../../../lib/prisma';
 import { compare, hash } from 'bcrypt';
-import { sign, verify } from 'jsonwebtoken';
+import { SignJWT, jwtVerify } from 'jose';
 
 // Handler functions for different actions
 const handlers = {
+  // Get partners handler
+  async getPartners(req: NextRequest) {
+    try {
+      const token = req.cookies.get('auth_token')?.value;
+
+      if (!token) {
+        return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+      }
+
+      try {
+        const jwtSecret = process.env.JWT_SECRET;
+        if (!jwtSecret) {
+          throw new Error('JWT_SECRET must be set in the .env file');
+        }
+
+        const secret = new TextEncoder().encode(jwtSecret);
+        const { payload } = await jwtVerify(token, secret);
+      
+        const partners = await prisma.partner.findMany({
+          where: {
+            createdById: payload.id,
+            isActive: true,
+          },
+          orderBy: {
+            name: 'asc',
+          },
+        });
+
+        return NextResponse.json({ partners });
+      } catch (error) {
+        return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
+      }
+    } catch (error) {
+      console.error('Error fetching partners:', error);
+      return NextResponse.json({ error: 'Failed to fetch partners' }, { status: 500 });
+    }
+  },
+
   // Login handler
   async login(req: NextRequest) {
     try {
@@ -55,16 +93,16 @@ const handlers = {
         throw new Error('JWT_SECRET must be set in the .env file');
       }
 
-      // Create JWT token
-      const token = sign(
-        {
-          id: user.id,
-          email: user.email,
-          role: user.role,
-        },
-        jwtSecret,
-        { expiresIn: '1d' }
-      );
+      // Create JWT token using jose
+      const secret = new TextEncoder().encode(jwtSecret);
+      const token = await new SignJWT({
+        id: user.id,
+        email: user.email,
+        role: user.role,
+      })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setExpirationTime('1d')
+        .sign(secret);
 
       // Create a response with user data
       const response = NextResponse.json({
@@ -139,15 +177,12 @@ const handlers = {
       }
 
       // Verify the token
-      const decoded = verify(token, jwtSecret) as {
-        id: number;
-        email: string;
-        role: string;
-      };
+      const secret = new TextEncoder().encode(jwtSecret);
+      const { payload } = await jwtVerify(token, secret);
 
       // Get the user from the database
       const user = await prisma.user.findUnique({
-        where: { id: decoded.id },
+        where: { id: payload.id },
         select: {
           id: true,
           name: true,
@@ -170,6 +205,50 @@ const handlers = {
       return NextResponse.json(
         { error: 'Authentication failed' },
         { status: 401 }
+      );
+    }
+  },
+
+  // Get partners handler
+  async getPartners(req: NextRequest) {
+    try {
+      const token = req.cookies.get('token')?.value;
+
+      if (!token) {
+        return NextResponse.json(
+          { error: 'Authentication required' },
+          { status: 401 }
+        );
+      }
+
+      try {
+        const decoded = verify(token, process.env.JWT_SECRET!) as { userId: number };
+      
+        const partners = await prisma.partner.findMany({
+          where: {
+            createdById: decoded.userId,
+            isActive: true,
+          },
+          orderBy: {
+            name: 'asc',
+          },
+          select: {
+            id: true,
+            name: true,
+            isActive: true,
+            createdAt: true,
+          }
+        });
+
+        return NextResponse.json({ partners });
+      } catch (error) {
+        return NextResponse.json({ error: 'Invalid token' }, { status: 401 });
+      }
+    } catch (error) {
+      console.error('Error fetching partners:', error);
+      return NextResponse.json(
+        { error: 'Failed to fetch partners' },
+        { status: 500 }
       );
     }
   },
@@ -203,20 +282,39 @@ const handlers = {
       // Hash the password
       const hashedPassword = await hash(password, 10);
 
-      // Create the user
-      const user = await prisma.user.create({
-        data: {
-          name,
-          email,
-          password: hashedPassword,
-          role: 'user', // Default role
-        },
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          role: true,
-        },
+      // Create the user with partners in a transaction
+      const user = await prisma.$transaction(async (prisma) => {
+        // Create the user
+        const newUser = await prisma.user.create({
+          data: {
+            name,
+            email,
+            password: hashedPassword,
+            role: 'user', // Default role
+          },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true,
+          },
+        });
+
+        // Create default partners for the user
+        const defaultPartners = ['Me', 'My Friend'];
+        await Promise.all(
+          defaultPartners.map((name) =>
+            prisma.partner.create({
+              data: {
+                name,
+                isActive: true,
+                createdById: newUser.id,
+              },
+            })
+          )
+        );
+
+        return newUser;
       });
 
       return NextResponse.json(user, { status: 201 });
@@ -262,19 +360,27 @@ export async function POST(req: NextRequest) {
 }
 
 // GET handler for user info
+// Main route handler
 export async function GET(req: NextRequest) {
-  // Get the action from the query parameter
-  const { searchParams } = new URL(req.url);
-  const action = searchParams.get('action');
+  try {
+    const { searchParams } = new URL(req.url);
+    const action = searchParams.get('action');
 
-  if (action === 'me') {
-    return handlers.me(req);
+    switch (action) {
+      case 'me':
+        return await handlers.me(req);
+      case 'partners':
+        return await handlers.getPartners(req);
+      default:
+        return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+    }
+  } catch (error) {
+    console.error('Error in user API:', error);
+    return NextResponse.json(
+      { error: 'An error occurred while processing your request' },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json(
-    { error: 'Invalid action' },
-    { status: 400 }
-  );
 }
 
 

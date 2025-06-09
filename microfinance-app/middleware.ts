@@ -8,17 +8,11 @@ const publicPaths = ['/login', '/api/user', '/api/debug-login'];
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Check if the path is public
-  if (publicPaths.some(path => pathname.startsWith(path))) {
-    return NextResponse.next();
-  }
-
-  // Skip API routes except those that need protection
-  if (pathname.startsWith('/api') &&
-      !pathname.startsWith('/api/dashboard') &&
-      !pathname.startsWith('/api/chit-funds') &&
-      !pathname.startsWith('/api/loans') &&
-      !pathname.startsWith('/api/members')) {
+  // Allow static files and public paths
+  if (pathname.startsWith('/_next') || 
+      pathname.startsWith('/public') || 
+      pathname === '/favicon.ico' ||
+      publicPaths.some(path => pathname.startsWith(path))) {
     return NextResponse.next();
   }
 
@@ -27,50 +21,36 @@ export async function middleware(request: NextRequest) {
 
   // If there's no token, redirect to login
   if (!token) {
-    const url = new URL('/login', request.url);
-    url.searchParams.set('from', pathname);
-    return NextResponse.redirect(url);
+    return NextResponse.redirect(new URL('/login', request.url));
   }
 
   try {
     // Get JWT secret from environment variable
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) {
-      throw new Error('JWT_SECRET must be set in the .env file');
+      console.error('JWT_SECRET not set in environment');
+      return NextResponse.redirect(new URL('/login', request.url));
     }
 
-    // Verify the token using jose (Edge compatible)
+    // Verify the token
     const secret = new TextEncoder().encode(jwtSecret);
     const { payload } = await jwtVerify(token, secret);
 
     // Check if the user is an admin
     if (payload.role !== 'admin') {
-      const url = new URL('/login', request.url);
-      url.searchParams.set('from', pathname);
-      url.searchParams.set('error', 'access_denied');
-      return NextResponse.redirect(url);
+      return NextResponse.redirect(new URL('/login?error=access_denied', request.url));
     }
 
-    // Continue to the protected route
+    // Allow the request to proceed
     return NextResponse.next();
   } catch (error) {
-    // If token verification fails, redirect to login
-    const url = new URL('/login', request.url);
-    url.searchParams.set('from', pathname);
-    url.searchParams.set('error', 'session_expired');
-    return NextResponse.redirect(url);
+    console.error('Token verification failed:', error);
+    return NextResponse.redirect(new URL('/login?error=session_expired', request.url));
   }
 }
 
 export const config = {
   matcher: [
-    /*
-     * Match all request paths except:
-     * - _next/static (static files)
-     * - _next/image (image optimization files)
-     * - favicon.ico (favicon file)
-     * - public folder
-     */
     '/((?!_next/static|_next/image|favicon.ico|public).*)',
   ],
 };
