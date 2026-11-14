@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '../../../../lib/prisma';
-import { getCurrentUserId } from '../../../../lib/auth';
+import { getCurrentUserId, isPrimaryAdmin } from '../../../../lib/auth';
+import { ensurePartnerLoginUser } from '../../../../lib/partnerLogins';
 
 export async function GET(
   req: NextRequest,
@@ -42,6 +43,10 @@ export async function PATCH(
     if (!userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    // Partner logins share the primary admin's data; only the primary admin manages partners.
+    if (!(await isPrimaryAdmin(req))) {
+      return NextResponse.json({ error: 'Only the primary admin can manage partners' }, { status: 403 });
+    }
 
     const data = await req.json();
     const { name, isActive } = data;
@@ -68,6 +73,15 @@ export async function PATCH(
       },
     });
 
+    // A re-activated partner without a login gets one (random password until the admin sets one).
+    if (isActive === true && updatedPartner) {
+      try {
+        await ensurePartnerLoginUser(updatedPartner.id);
+      } catch (loginError) {
+        console.error('Error creating partner login:', loginError);
+      }
+    }
+
     return NextResponse.json({ partner: updatedPartner });
   } catch (error: any) {
     console.error('Error updating partner:', error);
@@ -86,6 +100,10 @@ export async function DELETE(
     const userId = await getCurrentUserId(req);
     if (!userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    // Partner logins share the primary admin's data; only the primary admin manages partners.
+    if (!(await isPrimaryAdmin(req))) {
+      return NextResponse.json({ error: 'Only the primary admin can manage partners' }, { status: 403 });
     }
 
     const partnerId = parseInt(params.id);

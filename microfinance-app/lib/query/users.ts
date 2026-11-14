@@ -4,6 +4,7 @@
  *   const { data } = useUsers(enabled);       // GET /api/user?action=list-users
  *   await userWrites.create(body);            // POST /api/user?action=create-user
  *   await userWrites.remove(userId);          // POST /api/user?action=delete-user
+ *   await userWrites.setPassword(userId, pw); // POST /api/user?action=set-user-password
  *
  * The writes are plain fetch calls with exactly the headers and bodies the page always
  * sent (credentials are involved: nothing is added). The server enforces who may call them.
@@ -74,6 +75,8 @@ async function post<T>(action: string, body: unknown, fallback: string): Promise
 export const userWrites = {
   create: (body: CreateUserBody) => post<AppUser>('create-user', body, 'Failed to create user'),
   remove: (userId: number) => post<{ success: boolean }>('delete-user', { userId }, 'Failed to delete user'),
+  setPassword: (userId: number, newPassword: string) =>
+    post<{ success: boolean }>('set-user-password', { userId, newPassword }, 'Failed to set password'),
 };
 
 /** After a create or delete: the account list and the partner list (which partners have a login). */

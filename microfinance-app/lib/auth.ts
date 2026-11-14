@@ -51,6 +51,14 @@ export async function getCurrentUserId(request?: NextRequest): Promise<number | 
 }
 
 /**
+ * When the session token expires (ms since epoch), or null without a valid token.
+ */
+export async function getSessionExpiry(request?: NextRequest): Promise<number | null> {
+  const payload = await getTokenPayload(request);
+  return payload?.exp ? payload.exp * 1000 : null;
+}
+
+/**
  * Returns the actual logged-in user ID (for audit trails and notifications).
  */
 export async function getActorUserId(request?: NextRequest): Promise<number | null> {

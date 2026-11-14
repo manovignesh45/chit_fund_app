@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { verifyInternalKey } from '../../../../../lib/internalAuth';
 import prisma from '../../../../../lib/prisma';
 import { sendEmail, emailTemplates } from '../../../../../lib/emailConfig';
 import * as XLSX from 'xlsx';
@@ -6,18 +7,12 @@ import { logEmailSend } from '../../../../../lib/emailRecovery';
 
 // Recovery endpoint for monthly emails
 export async function POST(request: NextRequest) {
+  // Internal callers only (lib/scheduler.ts, lib/emailRecovery.ts); fails closed without INTERNAL_API_KEY.
+  if (!verifyInternalKey(request)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
-    // Verify this is an internal request (for security)
-    const authHeader = request.headers.get('authorization');
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
-
-    if (authHeader !== `Bearer ${internalKey}`) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
-
     // Parse request body
     const body = await request.json();
     const { type, period } = body;
@@ -84,7 +79,7 @@ export async function POST(request: NextRequest) {
       '<h2 style="color: #f59e0b;">🔄 Recovery Monthly Financial Report</h2>'
     ).replace(
       '<p>Please find attached your requested dashboard export report.</p>',
-      '<p>This is a <strong>recovery email</strong> for your monthly financial report. This email was sent because the original scheduled email was missed due to server downtime or technical issues.</p><p style="background-color: #fef3c7; padding: 10px; border-radius: 5px; border-left: 4px solid #f59e0b;"><strong>Note:</strong> This report covers the period from ${startDate.toLocaleDateString()} to ${endDate.toLocaleDateString()}.</p>'
+      `<p>This is a <strong>recovery email</strong> for your monthly financial report. This email was sent because the original scheduled email was missed due to server downtime or technical issues.</p><p style="background-color: #fef3c7; padding: 10px; border-radius: 5px; border-left: 4px solid #f59e0b;"><strong>Note:</strong> This report covers the period from ${startDate.toLocaleDateString()} to ${endDate.toLocaleDateString()}.</p>`
     );
 
     const fileName = `Recovery_Monthly_Report_${startDate.getFullYear()}_${String(startDate.getMonth() + 1).padStart(2, '0')}.xlsx`;
@@ -140,14 +135,15 @@ export async function POST(request: NextRequest) {
         status: 'failed',
         recipients: recipients,
         isRecovery: true,
-        errorMessage: error instanceof Error ? error.message : 'Unknown error'
+        // Full error is in the server log; EmailLog rows can be read back through the API.
+        errorMessage: 'Failed to send recovery monthly email (see server log)'
       });
     } catch (logError) {
       console.error('Error logging failed recovery email:', logError);
     }
 
     return NextResponse.json(
-      { error: `Failed to send recovery monthly email: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      { error: 'Failed to send recovery monthly email' },
       { status: 500 }
     );
   }

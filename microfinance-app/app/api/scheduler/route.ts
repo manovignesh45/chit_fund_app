@@ -133,7 +133,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Error controlling scheduler:', error);
     return NextResponse.json(
-      { error: `Failed to control scheduler: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      { error: 'Failed to control scheduler' },
       { status: 500 }
     );
   }

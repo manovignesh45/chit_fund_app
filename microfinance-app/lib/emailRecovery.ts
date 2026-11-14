@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client';
+import { internalAuthHeaders } from './internalAuth';
 
 const prisma = new PrismaClient();
 
@@ -282,13 +283,14 @@ export async function findMissedMonthlyDbBackups(): Promise<string[]> {
 export async function sendRecoveryMonthlyDbBackup(period: string): Promise<boolean> {
   try {
     const baseUrl = process.env.NEXTAUTH_URL || process.env.VERCEL_URL || 'http://localhost:3001';
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
+    const headers = internalAuthHeaders();
+    if (!headers) {
+      console.error('Skipping scheduled job: INTERNAL_API_KEY is not set');
+      return false;
+    }
     const response = await fetch(`${baseUrl}/api/scheduled/db-backup/recovery`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${internalKey}`
-      },
+      headers,
       body: JSON.stringify({ period })
     });
     if (response.ok) {
@@ -410,7 +412,7 @@ export async function sendRecoveryMonthlyEmail(period: string): Promise<boolean>
         status: 'failed',
         recipients: recipients,
         isRecovery: true,
-        errorMessage: error instanceof Error ? error.message : 'Unknown error'
+        errorMessage: 'Recovery email send failed (see server log)'
       });
     } catch (logError) {
       console.error('Error logging failed recovery email:', logError);
@@ -522,7 +524,7 @@ export async function sendRecoveryWeeklyEmail(period: string): Promise<boolean> 
         status: 'failed',
         recipients: recipients,
         isRecovery: true,
-        errorMessage: error instanceof Error ? error.message : 'Unknown error'
+        errorMessage: 'Recovery email send failed (see server log)'
       });
     } catch (logError) {
       console.error('Error logging failed recovery weekly email:', logError);

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { escapeHtmlMultiline } from '../../../lib/escapeHtml';
 import { getCurrentUserId } from '../../../lib/auth';
 import { sendEmail, testEmailConfiguration, emailTemplates, EmailAttachment } from '../../../lib/emailConfig';
 import prisma from '../../../lib/prisma';
@@ -90,8 +91,9 @@ async function handleTestConfiguration() {
       );
     }
   } catch (error) {
+    console.error('Email configuration test failed:', error);
     return NextResponse.json(
-      { error: `Email configuration test failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      { error: 'Email configuration test failed' },
       { status: 500 }
     );
   }
@@ -127,7 +129,7 @@ async function handleSendDashboardExport(emailData: any, user: any) {
       const customSection = `
         <div style="background-color: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f59e0b;">
           <h4 style="margin-top: 0; color: #92400e;">Additional Message:</h4>
-          <p style="color: #92400e; margin-bottom: 0;">${customMessage}</p>
+          <p style="color: #92400e; margin-bottom: 0;">${escapeHtmlMultiline(customMessage)}</p>
         </div>
       `;
       htmlContent = htmlContent.replace('</div>', customSection + '</div>');
@@ -160,7 +162,7 @@ async function handleSendDashboardExport(emailData: any, user: any) {
   } catch (error) {
     console.error('Error sending dashboard export email:', error);
     return NextResponse.json(
-      { error: `Failed to send email: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      { error: 'Failed to send email' },
       { status: 500 }
     );
   }
@@ -214,7 +216,7 @@ async function handleSendCustomEmail(emailData: any, user: any) {
   } catch (error) {
     console.error('Error sending custom email:', error);
     return NextResponse.json(
-      { error: `Failed to send email: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      { error: 'Failed to send email' },
       { status: 500 }
     );
   }

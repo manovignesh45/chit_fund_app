@@ -56,8 +56,8 @@ const baseUrl = process.env.NEXTAUTH_URL || process.env.VERCEL_URL || 'http://lo
 - **Weekly**: Next Sunday at 6:00 PM IST
 
 ### **Email Recipients**
-- manovignesh45@gmail.com
-- arulmurugan9497@gmail.com
+- recipient1@example.com
+- recipient2@example.com
 
 ## 🧪 **Testing Results**
 

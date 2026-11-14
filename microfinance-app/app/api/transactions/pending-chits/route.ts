@@ -92,7 +92,7 @@ export async function GET(request: NextRequest) {
   } catch (error: any) {
     console.error("Error fetching pending chit funds:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to fetch pending chit funds" },
+      { error: "Failed to fetch pending chit funds" },
       { status: 500 }
     );
   }

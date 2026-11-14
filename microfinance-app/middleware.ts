@@ -3,20 +3,43 @@ import type { NextRequest } from 'next/server';
 import { jwtVerify } from 'jose';
 import type { JWTPayload } from 'jose';
 
-// List of paths that don't require authentication
-const publicPaths = ['/login', '/api/user', '/api/debug-login', '/api/health'];
+// List of paths that don't require authentication. Matched as whole path segments
+// (matchesPath), so '/api/user' does not also open '/api/users'.
+const publicPaths = ['/login', '/api/user', '/api/health'];
+
+function matchesPath(pathname: string, path: string): boolean {
+  return pathname === path || pathname.startsWith(path + '/');
+}
 
 // Rate limiting (simple in-memory, per server instance; consider Redis for production)
 const MINUTE = 60000;
 const USER_LIMIT = 600; // per signed-in user per minute
 const IP_LIMIT = 100; // per IP per minute, for anything without a valid session
+const CREDENTIAL_LIMIT = 10; // per IP per minute, password-checking /api/user actions
 const MAX_BUCKETS = 5000;
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 
-// /api/user actions that check a password or create an account. These are always counted
-// per IP, even when the caller has a valid session, so holding one session cannot buy a
-// higher rate for guessing someone else's password.
-const credentialActions = new Set(['login', 'partner-login', 'register', 'change-password']);
+// /api/user actions that check or set a password. These are always counted per IP in their
+// own, stricter bucket, even when the caller has a valid session, so holding one session
+// cannot buy a higher rate for guessing someone else's password.
+const credentialActions = new Set(['login', 'partner-login', 'change-password', 'set-user-password']);
+
+// Client address for rate limiting. Next 15 has no request.ip, so this comes from headers.
+// Assumption: in production the app is only reachable through Dokploy's Traefik, which
+// (with its default forwardedHeaders settings) drops X-Forwarded-For / X-Real-Ip sent by an
+// untrusted client and then appends the address of the connection it accepted. A client can
+// still prepend fake entries if a trusted proxy passes them on, so only the RIGHT-MOST entry
+// (added by our own proxy) is used, never the first. If the app is ever exposed without
+// that proxy, or behind a CDN, these headers are client-controlled or name the CDN edge,
+// and the limits become per-header rather than per-client.
+function clientIp(request: NextRequest): string {
+  const forwarded = request.headers.get('x-forwarded-for');
+  if (forwarded) {
+    const entries = forwarded.split(',').map((s) => s.trim()).filter(Boolean);
+    if (entries.length) return entries[entries.length - 1];
+  }
+  return request.headers.get('x-real-ip')?.trim() || 'unknown';
+}
 
 // Drop expired windows once the map gets large. If it is still large (many distinct keys
 // inside one minute, e.g. spoofed X-Forwarded-For values), also drop the oldest entries so
@@ -90,16 +113,19 @@ export async function middleware(request: NextRequest) {
   const auth: AuthResult = isStatic ? { status: 'none' } : await checkAuth(request);
 
   // Get client IP for rate limiting
-  const ip = request.ip || request.headers.get('x-forwarded-for') || 'unknown';
+  const ip = clientIp(request);
 
   // Apply rate limiting (except for static assets)
   if (!isStatic) {
-    const isAuthEntry = pathname.startsWith('/login') || pathname.startsWith('/api/user');
-    const isCredentialAction = pathname.startsWith('/api/user') &&
+    const isLogin = matchesPath(pathname, '/login');
+    const isAuthEntry = isLogin || matchesPath(pathname, '/api/user');
+    const isCredentialAction = matchesPath(pathname, '/api/user') &&
       credentialActions.has(request.nextUrl.searchParams.get('action') || '');
 
     let allowed: boolean;
-    if (auth.status === 'ok' && !pathname.startsWith('/login') && !isCredentialAction) {
+    if (isCredentialAction) {
+      allowed = rateLimit(`cred:${ip}`, CREDENTIAL_LIMIT);
+    } else if (auth.status === 'ok' && !isLogin) {
       // Key on the actual signed-in user (actorId, as getActorUserId in lib/auth.ts).
       // `id` is the data owner, which partner logins share with the primary admin.
       const userId = auth.payload.actorId ?? auth.payload.id;
@@ -130,9 +156,19 @@ export async function middleware(request: NextRequest) {
     const origin = request.headers.get('origin');
     const host = request.headers.get('host');
 
-    // For non-GET API requests, verify same-origin
-    if (origin && !origin.includes(host || '')) {
-      return new NextResponse('Forbidden - Invalid Origin', { status: 403 });
+    // For non-GET API requests, verify same-origin: the Origin's host[:port] must equal the
+    // Host header exactly (a substring test would accept https://<host>.evil.com). Requests
+    // without an Origin header are allowed; the sameSite=strict session cookie covers those.
+    if (origin) {
+      let sameOrigin = false;
+      try {
+        sameOrigin = !!host && new URL(origin).host === host;
+      } catch {
+        sameOrigin = false; // malformed Origin (including the literal "null")
+      }
+      if (!sameOrigin) {
+        return new NextResponse('Forbidden - Invalid Origin', { status: 403 });
+      }
     }
   }
 
@@ -141,7 +177,14 @@ export async function middleware(request: NextRequest) {
       pathname === '/favicon.ico' ||
       pathname === '/manifest.json' ||
       pathname.startsWith('/icons/') ||
-      publicPaths.some(path => pathname.startsWith(path))) {
+      publicPaths.some(path => matchesPath(pathname, path))) {
+    return response;
+  }
+
+  // Scheduled-job endpoints are called by the in-process scheduler without a session;
+  // every handler under /api/scheduled/ checks the INTERNAL_API_KEY bearer itself
+  // (lib/internalAuth.ts) and fails closed when the key is unset.
+  if (pathname.startsWith('/api/scheduled/')) {
     return response;
   }
 

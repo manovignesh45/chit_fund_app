@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import { internalAuthHeaders } from './internalAuth';
 
 // Global variables to store the scheduled tasks
 // Use type 'any' for cron.ScheduledTask to avoid type errors
@@ -187,14 +188,15 @@ export function stopMonthlyDbBackupScheduler() {
 async function sendLoanDueReminders() {
   try {
     const baseUrl = process.env.NEXTAUTH_URL || process.env.VERCEL_URL || 'http://localhost:3001';
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
+    const headers = internalAuthHeaders();
+    if (!headers) {
+      console.error('Skipping scheduled job: INTERNAL_API_KEY is not set');
+      return;
+    }
 
     const response = await fetch(`${baseUrl}/api/scheduled/loan-due-reminder`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${internalKey}`,
-      },
+      headers,
     });
 
     if (response.ok) {
@@ -329,16 +331,17 @@ export async function triggerMonthlyDbBackupNow() {
 async function sendScheduledMonthlyEmail() {
   try {
     const baseUrl = process.env.NEXTAUTH_URL || process.env.VERCEL_URL || 'http://localhost:3001';
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
+    const headers = internalAuthHeaders();
+    if (!headers) {
+      console.error('Skipping scheduled job: INTERNAL_API_KEY is not set');
+      return;
+    }
 
     console.log('Sending scheduled monthly email...');
 
     const response = await fetch(`${baseUrl}/api/scheduled/email`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${internalKey}`
-      }
+      headers
     });
 
     if (response.ok) {
@@ -358,16 +361,17 @@ async function sendScheduledMonthlyEmail() {
 async function sendScheduledWeeklyEmail() {
   try {
     const baseUrl = process.env.NEXTAUTH_URL || process.env.VERCEL_URL || 'http://localhost:3001';
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
+    const headers = internalAuthHeaders();
+    if (!headers) {
+      console.error('Skipping scheduled job: INTERNAL_API_KEY is not set');
+      return;
+    }
 
     console.log('Sending scheduled weekly email...');
 
     const response = await fetch(`${baseUrl}/api/scheduled/weekly-email`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${internalKey}`
-      }
+      headers
     });
 
     if (response.ok) {
@@ -387,16 +391,17 @@ async function sendScheduledWeeklyEmail() {
 async function sendScheduledMonthlyDbBackup() {
   try {
     const baseUrl = process.env.NEXTAUTH_URL || process.env.VERCEL_URL || 'http://localhost:3001';
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
+    const headers = internalAuthHeaders();
+    if (!headers) {
+      console.error('Skipping scheduled job: INTERNAL_API_KEY is not set');
+      return;
+    }
 
     console.log('Sending scheduled monthly DB backup...');
 
     const response = await fetch(`${baseUrl}/api/scheduled/db-backup`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${internalKey}`
-      }
+      headers
     });
 
     if (response.ok) {

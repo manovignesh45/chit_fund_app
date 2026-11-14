@@ -1,10 +1,14 @@
 /**
- * One-time setup: create login accounts for each business partner.
- * Password is copied from the primary admin (same password for everyone).
+ * Create a login account for each active business partner of the primary admin that has none.
+ * New logins get a random password nobody knows; the primary admin then sets each partner's
+ * password on the /users page ("Set password"). Existing users are never modified.
+ * (The app does the same automatically when a partner is created or the admin opens /users.)
  *
  * Usage: node scripts/setup-partner-logins.js
  */
 require('dotenv').config();
+const crypto = require('crypto');
+const bcrypt = require('bcrypt');
 const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
@@ -15,91 +19,57 @@ function partnerEmail(partnerName, adminEmail) {
   return `${slug}@${domain}`;
 }
 
-async function ensurePartnerLoginUsers() {
+async function uniquePartnerEmail(partner, adminEmail) {
+  const [local, domain] = partnerEmail(partner.name, adminEmail).split('@');
+  const slug = local || `partner${partner.id}`;
+  const candidates = [`${slug}@${domain}`, `${slug}+${partner.id}@${domain}`];
+  for (let n = 2; n < 50; n++) candidates.push(`${slug}+${partner.id}-${n}@${domain}`);
+  for (const email of candidates) {
+    if (!(await prisma.user.findUnique({ where: { email }, select: { id: true } }))) return email;
+  }
+  return `${slug}+${partner.id}-${crypto.randomBytes(4).toString('hex')}@${domain}`;
+}
+
+async function main() {
+  console.log('Creating missing partner login accounts...\n');
+
   const primaryAdmin = await prisma.user.findFirst({
     where: { role: 'admin', dataOwnerId: null },
     orderBy: { id: 'asc' },
   });
-
-  if (!primaryAdmin) {
-    throw new Error('Primary admin account not found');
-  }
+  if (!primaryAdmin) throw new Error('Primary admin account not found');
 
   const partners = await prisma.partner.findMany({
     where: { createdById: primaryAdmin.id, isActive: true },
     orderBy: { name: 'asc' },
   });
 
-  const created = [];
-  const existing = [];
-
   for (const partner of partners) {
-    const existingUser = await prisma.user.findFirst({
-      where: { partnerId: partner.id },
-    });
-
-    if (existingUser) {
-      await prisma.user.update({
-        where: { id: existingUser.id },
-        data: { password: primaryAdmin.password },
-      });
-      existing.push(partner.name);
+    const existing = await prisma.user.findFirst({ where: { partnerId: partner.id } });
+    if (existing) {
+      console.log(`  ${partner.name} → ${existing.email} (already has a login, unchanged)`);
       continue;
     }
-
-    const email = partnerEmail(partner.name, primaryAdmin.email);
-    const emailTaken = await prisma.user.findUnique({ where: { email } });
-
-    if (emailTaken) {
-      await prisma.user.update({
-        where: { id: emailTaken.id },
-        data: {
-          name: partner.name,
-          role: 'partner',
-          partnerId: partner.id,
-          dataOwnerId: primaryAdmin.id,
-          password: primaryAdmin.password,
-        },
-      });
-      existing.push(partner.name);
-      continue;
-    }
-
+    const email = await uniquePartnerEmail(partner, primaryAdmin.email);
     await prisma.user.create({
       data: {
         name: partner.name,
         email,
-        password: primaryAdmin.password,
+        password: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10),
         role: 'partner',
         partnerId: partner.id,
         dataOwnerId: primaryAdmin.id,
       },
     });
-    created.push(partner.name);
+    console.log(`  ${partner.name} → ${email} (created; set its password on /users)`);
   }
 
-  return { primaryAdmin, created, existing, partners };
-}
-
-async function main() {
-  console.log('Setting up partner login accounts...\n');
-
-  const { primaryAdmin, created, existing, partners } = await ensurePartnerLoginUsers();
-
-  console.log('Partner login accounts:');
-  for (const partner of partners) {
-    const user = await prisma.user.findFirst({ where: { partnerId: partner.id } });
-    console.log(`  ${partner.name} → ${user?.email} (password: same as admin)`);
-  }
-
-  if (created.length > 0) console.log(`\nCreated: ${created.join(', ')}`);
-  if (existing.length > 0) console.log(`Synced: ${existing.join(', ')}`);
-  console.log('\nDone! Partners select their name on the login page.');
+  console.log('\nDone. Set each new partner password on the /users page before they log in.');
 }
 
 main()
   .catch((e) => {
-    console.error(e);
+    console.error(e instanceof Error ? e.message : e);
     process.exit(1);
   })
   .finally(() => prisma.$disconnect());

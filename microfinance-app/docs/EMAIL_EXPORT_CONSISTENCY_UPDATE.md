@@ -105,8 +105,8 @@ All exports now generate files with:
 
 ## 📬 **Email Recipients**
 All scheduled emails are sent to:
-- manovignesh45@gmail.com
-- arulmurugan9497@gmail.com
+- recipient1@example.com
+- recipient2@example.com
 
 ## 🔄 **Next Steps**
 1. **Monitor email delivery**: Check that you receive the updated format emails

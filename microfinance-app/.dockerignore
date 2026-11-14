@@ -1,29 +1,57 @@
-# Node modules and dependencies
+# Keep the build context to what `next build` and `prisma migrate deploy` need.
+
+# Secrets: Dokploy writes a .env into the build directory; it must never reach the image.
+# Runtime env vars come from Dokploy at container start.
+**/.env*
+!.env.example
+
+# Dependencies and build output (rebuilt inside the image)
 node_modules
-npm-debug.log
-yarn-error.log
+.next
+out
+build
+dist
+**/*.tsbuildinfo
 
-# Prisma generated files (optional, if you want to re-generate inside Docker)
-node_modules/@prisma/client
-
-# Logs
-*.log
-
-# Environment files
-# .env
-
-# Git files
+# VCS, editors, tooling
 .git
 .gitignore
-
-# Docker files themselves (optional)
-Dockerfile
-.dockerignore
-
-# VSCode and other editors
 .vscode
 .idea
+.DS_Store
+.playwright-mcp
+graphify-out
+.graphifyignore
+Dockerfile
+.dockerignore
+docker-compose*.yml
 
-# Build outputs (if any)
-dist
-build
+# Data, dumps and scratch files (Docker patterns match from the context root, hence **/)
+temp
+tmp
+backups
+**/*.sql
+!prisma/migrations/**/migration.sql
+**/*.db
+**/*.xlsx
+**/*.xls
+**/*.zip
+**/*.log
+
+# Docs and tests
+docs
+tests
+**/*.md
+
+# One-off debug / report scripts
+debug-*.js
+check-email-logs.js
+verify-implementation.js
+implementation-summary.js
+
+# Other hosting providers
+vercel.json
+.vercel
+.vercelignore
+tsconfig.vercel.json
+render.yaml

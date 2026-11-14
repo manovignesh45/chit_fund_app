@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { verifyInternalKey } from '../../../../lib/internalAuth';
 import prisma from '../../../../lib/prisma';
 import { sendEmail, emailTemplates } from '../../../../lib/emailConfig';
 import { logEmailSend, getMonthlyPeriod } from '../../../../lib/emailRecovery';
@@ -8,6 +9,11 @@ import { getFinancialDataForExport, generateCommonExcelReport } from '../../../.
 
 // This endpoint handles automatic monthly email sending
 export async function POST(request: NextRequest) {
+  // Internal callers only (lib/scheduler.ts, lib/emailRecovery.ts); fails closed without INTERNAL_API_KEY.
+  if (!verifyInternalKey(request)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
     // Check if automatic emails are enabled
     const isEnabled = process.env.AUTO_MONTHLY_EMAIL_ENABLED === 'true';
@@ -15,17 +21,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'Automatic monthly emails are disabled' },
         { status: 400 }
-      );
-    }
-
-    // Verify this is an internal request (for security)
-    const authHeader = request.headers.get('authorization');
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
-
-    if (authHeader !== `Bearer ${internalKey}`) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
       );
     }
 
@@ -88,7 +83,6 @@ export async function POST(request: NextRequest) {
     );
 
 
-
     await sendEmail({
       to: recipients,
       subject: scheduledEmailSubject,
@@ -141,21 +135,26 @@ export async function POST(request: NextRequest) {
         status: 'failed',
         recipients: recipients,
         isRecovery: false,
-        errorMessage: error instanceof Error ? error.message : 'Unknown error'
+        // Full error is in the server log; EmailLog rows can be read back through the API.
+        errorMessage: 'Failed to send monthly email (see server log)'
       });
     } catch (logError) {
       console.error('Error logging failed email:', logError);
     }
 
     return NextResponse.json(
-      { error: `Failed to send monthly email: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      { error: 'Failed to send monthly email' },
       { status: 500 }
     );
   }
 }
 
-// GET endpoint to check scheduled email status
+// GET endpoint to check scheduled email status (internal key required, like POST)
 export async function GET(request: NextRequest) {
+  if (!verifyInternalKey(request)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
     const isEnabled = process.env.AUTO_MONTHLY_EMAIL_ENABLED === 'true';
     const day = parseInt(process.env.AUTO_MONTHLY_EMAIL_DAY || '1', 10);

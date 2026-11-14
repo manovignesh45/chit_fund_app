@@ -15,7 +15,8 @@ async function main() {
       throw new Error('JWT_SECRET must be set in the .env file');
     }
     
-    console.log('JWT_SECRET is set:', jwtSecret.substring(0, 3) + '...' + jwtSecret.substring(jwtSecret.length - 3));
+    // Never print any part of the secret.
+    console.log('JWT_SECRET is set.');
     
     // Admin email identifies which account to test against (password isn't
     // needed here — this script only checks JWT signing/verification, not login).
@@ -59,8 +60,8 @@ async function main() {
     
     // Verify the token
     try {
-      const decoded = verify(token, jwtSecret);
-      console.log('Token verification successful:', decoded);
+      verify(token, jwtSecret);
+      console.log('Token verification successful.');
     } catch (error) {
       console.error('Token verification failed:', error);
       throw error;

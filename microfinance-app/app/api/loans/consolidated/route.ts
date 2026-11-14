@@ -15,6 +15,7 @@ import { notifyOtherAdmins, getActorName } from "../../../../lib/notifications";
 import { computeLoanDuePeriods, getLoanDueDate } from "../../../../lib/duesTracker";
 import { calculateLoanProfit } from "../../../../lib/financialUtils";
 import { NON_RECOVERABLE, RecoveryError } from "../../../../lib/loanRecovery";
+import { PublicError, errorResponse } from "../../../../lib/apiError";
 import { parseListParams, type SortTarget } from "../../../../lib/list/server";
 import { buildMeta, MAX_PAGE_SIZE } from "../../../../lib/list/types";
 
@@ -817,11 +818,7 @@ async function exportLoan(
     });
   } catch (error) {
     console.error("Error exporting loan:", error);
-    throw new Error(
-      `Failed to export loan: ${
-        error instanceof Error ? error.message : "Unknown error"
-      }`
-    );
+    throw error; // the GET handler answers with a generic message
   }
 }
 
@@ -857,11 +854,7 @@ async function exportAllLoans(request: NextRequest, currentUserId: number) {
     });
   } catch (error) {
     console.error("Error exporting all loans:", error);
-    throw new Error(
-      `Failed to export loans: ${
-        error instanceof Error ? error.message : "Unknown error"
-      }`
-    );
+    throw error; // the GET handler answers with a generic message
   }
 }
 
@@ -910,11 +903,7 @@ async function exportSelectedLoans(
     });
   } catch (error) {
     console.error("Error exporting selected loans:", error);
-    throw new Error(
-      `Failed to export loans: ${
-        error instanceof Error ? error.message : "Unknown error"
-      }`
-    );
+    throw error; // the GET handler answers with a generic message
   }
 }
 
@@ -1095,9 +1084,13 @@ async function createLoan(request: NextRequest, currentUserId: number) {
     // ... (Validation and globalMember logic remains the same) ...
      let globalMember;
     if (body.globalMemberId) {
-      globalMember = await prisma.globalMember.findUnique({
-        where: { id: body.globalMemberId },
-      });
+      // Owner filter: a member id from the request must belong to this account's data.
+      const globalMemberId = parseInt(body.globalMemberId);
+      globalMember = Number.isFinite(globalMemberId)
+        ? await prisma.globalMember.findFirst({
+            where: { id: globalMemberId, createdById: currentUserId },
+          })
+        : null;
       if (!globalMember) {
         return NextResponse.json(
           { error: "Global member not found" },
@@ -1259,9 +1252,7 @@ async function createLoan(request: NextRequest, currentUserId: number) {
     return NextResponse.json(loan, { status: 201 });
 
   } catch (error) {
-    console.error("Error creating loan:", error);
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: "Failed to create loan", details: errorMessage }, { status: 500 });
+    return errorResponse(error, "Create loan", "Failed to create loan");
   }
 }
 
@@ -1289,7 +1280,10 @@ async function addRepayment(request: NextRequest, id: number, currentUserId: num
 
       // --- Input validation (remains the same) ... ---
 
-      const collectorPartner = await tx.partner.findUnique({ where: { id: parseInt(collected_by) } });
+      const collectorId = parseInt(collected_by);
+      const collectorPartner = Number.isFinite(collectorId)
+        ? await tx.partner.findFirst({ where: { id: collectorId, createdById: currentUserId } })
+        : null;
       if (!collectorPartner) {
         return NextResponse.json({ error: "Collector partner not found" }, { status: 400 });
       }
@@ -1309,7 +1303,7 @@ async function addRepayment(request: NextRequest, id: number, currentUserId: num
       });
 
       if (!loan || loan.createdById !== currentUserId) {
-        throw new Error("Loan not found or permission denied");
+        throw new PublicError("Loan not found", 404);
       }
       if (loan.status === NON_RECOVERABLE || paymentType.startsWith('RECOVERY')) {
         return NextResponse.json({ error: 'Use Record Recovery on the loan details page' }, { status: 409 });
@@ -1462,9 +1456,7 @@ async function addRepayment(request: NextRequest, id: number, currentUserId: num
     return NextResponse.json({ loan: result.repayment }, { status: 201 });
 
   } catch (error) {
-    console.error("Error creating repayment:", error);
-    const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: `Failed to create repayment: ${errorMessage}`}, { status: 500 });
+    return errorResponse(error, "Create repayment", "Failed to create repayment");
   }
 }
 
@@ -1515,8 +1507,6 @@ async function updateLoan(
       });
     }
 
-    // Log the update request
-    console.log("Updating loan with data:", body);
 
     // Update the loan
     const loan = await prismaAny.loan.update({
@@ -1630,11 +1620,11 @@ async function deleteLoan(request: NextRequest, id: number, currentUserId: numbe
       });
 
       if (!existingLoan) {
-        throw new Error("Loan not found");
+        throw new PublicError("Loan not found", 404);
       }
 
       if (existingLoan.createdById !== currentUserId) {
-        throw new Error("You do not have permission to delete this loan");
+        throw new PublicError("You do not have permission to delete this loan", 403);
       }
       if (existingLoan.nonRecoverableAt) {
         throw new RecoveryError('Loans with recovery history must be retained for audit', 409);
@@ -1646,7 +1636,7 @@ async function deleteLoan(request: NextRequest, id: number, currentUserId: numbe
       );
 
       if (hasRepayments) {
-        throw new Error("Cannot delete loan: Loan has repayment transactions. Please delete all repayments first.");
+        throw new PublicError("Cannot delete loan: Loan has repayment transactions. Please delete all repayments first.", 409);
       }
 
       // 3. Find the LOAN_DISBURSEMENT transaction (from loan creation)
@@ -1767,9 +1757,10 @@ async function deleteLoan(request: NextRequest, id: number, currentUserId: numbe
 
     return NextResponse.json({ message: "Loan deleted successfully" });
   } catch (error) {
-    console.error("Error deleting loan:", error);
-    const errorMessage = error instanceof Error ? error.message : "Permission denied";
-    return NextResponse.json({ error: errorMessage }, { status: error instanceof RecoveryError ? error.status : 500 });
+    if (error instanceof RecoveryError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    return errorResponse(error, "Delete loan", "Failed to delete loan");
   }
 }
 
@@ -1807,7 +1798,7 @@ async function deleteRepayment(request: NextRequest, id: number, currentUserId: 
           });
 
           if (!repaymentToDelete || repaymentToDelete.loan.createdById !== currentUserId || repaymentToDelete.loanId !== loanId) {
-              throw new Error("Repayment not found or permission denied.");
+              throw new PublicError("Repayment not found", 404);
           }
           if (repaymentToDelete.loan.nonRecoverableAt || repaymentToDelete.paymentType === 'RECOVERY') {
               return NextResponse.json({ error: 'Use Reverse Receipt for recovery corrections. Loans with recovery history cannot use ordinary repayment deletion.' }, { status: 409 });
@@ -1911,9 +1902,7 @@ async function deleteRepayment(request: NextRequest, id: number, currentUserId: 
         return response;
 
     } catch (error) {
-        console.error("Error deleting repayment:", error);
-        const errorMessage = error instanceof Error ? error.message : "Unknown error";
-        return NextResponse.json({ error: `Failed to delete repayment: ${errorMessage}` }, { status: 500 });
+        return errorResponse(error, "Delete repayment", "Failed to delete repayment");
     }
 }
 

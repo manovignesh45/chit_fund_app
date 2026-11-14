@@ -1,4 +1,5 @@
-import nodemailer from 'nodemailer';
+import nodemailer, { type SentMessageInfo, type Transporter } from 'nodemailer';
+import { escapeHtml, escapeHtmlMultiline } from './escapeHtml';
 
 // Email configuration interface
 export interface EmailConfig {
@@ -30,7 +31,7 @@ export interface EmailOptions {
 }
 
 // Create email transporter
-export function createEmailTransporter(): nodemailer.Transporter {
+export function createEmailTransporter(): Transporter {
   // Validate required environment variables
   const requiredEnvVars = [
     'SMTP_HOST',
@@ -62,7 +63,7 @@ export function createEmailTransporter(): nodemailer.Transporter {
 }
 
 // Send email function
-export async function sendEmail(options: EmailOptions): Promise<void> {
+export async function sendEmail(options: EmailOptions): Promise<SentMessageInfo> {
   try {
     const transporter = createEmailTransporter();
 
@@ -114,18 +115,19 @@ export const emailTemplates = {
   // Dashboard export email template
   dashboardExport: (recipientName: string, exportType: string, period: string) => ({
     subject: `Dashboard Export - ${exportType} Report (${period})`,
+    // Every interpolated value is escaped: names and labels come from the database or the request.
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #2563eb;">Dashboard Export Report</h2>
-        <p>Dear ${recipientName},</p>
+        <p>Dear ${escapeHtml(recipientName)},</p>
         <p>Please find attached your requested dashboard export report.</p>
 
         <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0;">
           <h3 style="margin-top: 0; color: #374151;">Report Details:</h3>
           <ul style="color: #6b7280;">
-            <li><strong>Export Type:</strong> ${exportType}</li>
-            <li><strong>Period:</strong> ${period}</li>
-            <li><strong>Generated On:</strong> ${new Date().toLocaleString()}</li>
+            <li><strong>Export Type:</strong> ${escapeHtml(exportType)}</li>
+            <li><strong>Period:</strong> ${escapeHtml(period)}</li>
+            <li><strong>Generated On:</strong> ${escapeHtml(new Date().toLocaleString())}</li>
           </ul>
         </div>
 
@@ -175,10 +177,10 @@ This is an automated email. Please do not reply to this message.
     subject: title,
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-        <h2 style="color: #2563eb;">${title}</h2>
-        <p>Dear ${recipientName},</p>
+        <h2 style="color: #2563eb;">${escapeHtml(title)}</h2>
+        <p>Dear ${escapeHtml(recipientName)},</p>
         <div style="background-color: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0;">
-          ${message}
+          ${escapeHtmlMultiline(message)}
         </div>
         <p style="margin-top: 30px;">
           Best regards,<br>

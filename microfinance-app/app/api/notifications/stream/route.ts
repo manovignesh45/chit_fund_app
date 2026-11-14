@@ -1,10 +1,8 @@
 import { NextRequest } from 'next/server';
 import prisma from '../../../../lib/prisma';
-import { getActorUserId } from '../../../../lib/auth';
-import {
-  registerNotificationClient,
-  unregisterNotificationClient,
-} from '../../../../lib/notificationStream';
+import { getActorUserId, getSessionExpiry } from '../../../../lib/auth';
+import { notificationClients } from '../../../../lib/notificationStream';
+import { openSSEStream } from '../../../../lib/sseRegistry';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -15,47 +13,13 @@ export async function GET(request: NextRequest) {
     return new Response('Unauthorized', { status: 401 });
   }
 
-  const clientId = crypto.randomUUID();
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
-  let closed = false;
-
-  const stream = new ReadableStream({
-    async start(controller) {
-      const encoder = new TextEncoder();
-
-      const send = (chunk: string) => {
-        if (closed) return;
-        try {
-          controller.enqueue(encoder.encode(chunk));
-        } catch {
-          closed = true;
-        }
-      };
-
-      registerNotificationClient(userId, { id: clientId, send });
-
-      const unreadCount = await prisma.notification.count({
-        where: { userId, read: false },
-      });
-
-      send(`event: connected\ndata: ${JSON.stringify({ unreadCount })}\n\n`);
-
-      heartbeat = setInterval(() => {
-        send(': ping\n\n');
-      }, 25000);
-    },
-    cancel() {
-      closed = true;
-      if (heartbeat) clearInterval(heartbeat);
-      unregisterNotificationClient(userId, clientId);
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-    },
+  return openSSEStream({
+    request,
+    registry: notificationClients,
+    userId,
+    expiresAt: await getSessionExpiry(request),
+    connected: async () => ({
+      unreadCount: await prisma.notification.count({ where: { userId, read: false } }),
+    }),
   });
 }

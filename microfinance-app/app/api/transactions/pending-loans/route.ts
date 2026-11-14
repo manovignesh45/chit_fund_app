@@ -70,7 +70,7 @@ export async function GET(request: NextRequest) {
   } catch (error: any) {
     console.error("Error fetching pending loans:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to fetch pending loans" },
+      { error: "Failed to fetch pending loans" },
       { status: 500 }
     );
   }
