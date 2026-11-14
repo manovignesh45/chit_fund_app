@@ -130,9 +130,7 @@ After optimization, the following scripts are available:
 - `npm run verify-auth` - Verify authentication setup
 
 ### Deployment
-- `npm run vercel-build` - Build for Vercel deployment
-- `npm run cleanup-prisma` - Clean up Prisma files
-- `npm run optimize-vercel` - Optimize for Vercel
+- See `docs/DEPLOY.md` (Dokploy, Docker image)
 
 ## 📝 **Notes**
 
