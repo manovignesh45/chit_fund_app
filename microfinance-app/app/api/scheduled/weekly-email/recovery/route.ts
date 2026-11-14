@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
       '<h2 style="color: #f59e0b;">🔄 Recovery Weekly Financial Report</h2>'
     ).replace(
       '<p>Please find attached your requested dashboard export report.</p>',
-      '<p>This is a <strong>recovery email</strong> for your weekly financial report. This email was sent because the original scheduled email was missed due to server downtime or technical issues.</p><p style="background-color: #fef3c7; padding: 10px; border-radius: 5px; border-left: 4px solid #f59e0b;"><strong>Note:</strong> This report covers the week from ${startDate.toLocaleDateString()} to ${endDate.toLocaleDateString()}.</p>'
+      `<p>This is a <strong>recovery email</strong> for your weekly financial report. This email was sent because the original scheduled email was missed due to server downtime or technical issues.</p><p style="background-color: #fef3c7; padding: 10px; border-radius: 5px; border-left: 4px solid #f59e0b;"><strong>Note:</strong> This report covers the week from ${startDate.toLocaleDateString()} to ${endDate.toLocaleDateString()}.</p>`
     );
 
     const fileName = `Recovery_Weekly_Report_${startDate.getFullYear()}_W${getWeekNumber(startDate)}.xlsx`;

@@ -66,7 +66,7 @@ This application is a full-stack solution for managing microfinance operations a
    ```
    DATABASE_URL="mysql://username:password@host:port/database"
    JWT_SECRET="your-secret-key-for-jwt-encryption"
-   ADMIN_EMAIL="amfincorp1@gmail.com"
+   ADMIN_EMAIL="admin@example.com"
    ADMIN_PASSWORD="REDACTED"
    ```
 
@@ -87,7 +87,7 @@ This application is a full-stack solution for managing microfinance operations a
    - The application will be available at http://localhost:3000
 
 6. **Login with default admin credentials**
-   - Email: amfincorp1@gmail.com
+   - Email: admin@example.com
    - Password: AMFadmin2020
    - It's recommended to change these credentials after first login
 
@@ -106,7 +106,7 @@ DATABASE_URL="mysql://root:password@localhost:3306/microfinance"
 
 For the Railway-hosted database:
 ```
-DATABASE_URL="mysql://username:password@yamanote.proxy.rlwy.net:17751/microfinance"
+DATABASE_URL="mysql://username:password@your-db-host:3306/microfinance"
 ```
 
 ## Project Structure
@@ -177,7 +177,7 @@ The application uses JWT-based authentication with the following security featur
 - Environment variable configuration for sensitive data
 
 Default admin credentials are stored in environment variables:
-- Email: `ADMIN_EMAIL` (default: amfincorp1@gmail.com)
+- Email: `ADMIN_EMAIL` (default: admin@example.com)
 - Password: `ADMIN_PASSWORD` (default: AMFadmin2020)
 
 ## Dashboard

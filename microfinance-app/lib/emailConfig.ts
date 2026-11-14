@@ -1,4 +1,4 @@
-import nodemailer from 'nodemailer';
+import nodemailer, { type SentMessageInfo, type Transporter } from 'nodemailer';
 import { escapeHtml, escapeHtmlMultiline } from './escapeHtml';
 
 // Email configuration interface
@@ -31,7 +31,7 @@ export interface EmailOptions {
 }
 
 // Create email transporter
-export function createEmailTransporter(): nodemailer.Transporter {
+export function createEmailTransporter(): Transporter {
   // Validate required environment variables
   const requiredEnvVars = [
     'SMTP_HOST',
@@ -63,7 +63,7 @@ export function createEmailTransporter(): nodemailer.Transporter {
 }
 
 // Send email function
-export async function sendEmail(options: EmailOptions): Promise<void> {
+export async function sendEmail(options: EmailOptions): Promise<SentMessageInfo> {
   try {
     const transporter = createEmailTransporter();
 

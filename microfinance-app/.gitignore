@@ -82,3 +82,14 @@ temp/
 # graphify
 graphify-out
 
+
+# Secrets, data dumps and scratch output: never commit
+.env*
+!.env.example
+backups/
+*.sql
+!**/prisma/migrations/**/migration.sql
+*.db
+*.xlsx
+.playwright-mcp/
+temp/
