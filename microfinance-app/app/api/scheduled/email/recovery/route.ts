@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { verifyInternalKey } from '../../../../../lib/internalAuth';
 import prisma from '../../../../../lib/prisma';
 import { sendEmail, emailTemplates } from '../../../../../lib/emailConfig';
 import * as XLSX from 'xlsx';
@@ -6,18 +7,12 @@ import { logEmailSend } from '../../../../../lib/emailRecovery';
 
 // Recovery endpoint for monthly emails
 export async function POST(request: NextRequest) {
+  // Internal callers only (lib/scheduler.ts, lib/emailRecovery.ts); fails closed without INTERNAL_API_KEY.
+  if (!verifyInternalKey(request)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
-    // Verify this is an internal request (for security)
-    const authHeader = request.headers.get('authorization');
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
-
-    if (authHeader !== `Bearer ${internalKey}`) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
-
     // Parse request body
     const body = await request.json();
     const { type, period } = body;

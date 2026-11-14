@@ -145,6 +145,13 @@ export async function middleware(request: NextRequest) {
     return response;
   }
 
+  // Scheduled-job endpoints are called by the in-process scheduler without a session;
+  // every handler under /api/scheduled/ checks the INTERNAL_API_KEY bearer itself
+  // (lib/internalAuth.ts) and fails closed when the key is unset.
+  if (pathname.startsWith('/api/scheduled/')) {
+    return response;
+  }
+
   switch (auth.status) {
     case 'ok':
       // Allow the request to proceed

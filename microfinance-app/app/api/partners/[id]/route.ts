@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '../../../../lib/prisma';
 import { getCurrentUserId } from '../../../../lib/auth';
+import { ensurePartnerLoginUser } from '../../../../lib/partnerLogins';
 
 export async function GET(
   req: NextRequest,
@@ -67,6 +68,15 @@ export async function PATCH(
         createdById: userId,
       },
     });
+
+    // A re-activated partner without a login gets one (random password until the admin sets one).
+    if (isActive === true && updatedPartner) {
+      try {
+        await ensurePartnerLoginUser(updatedPartner.id);
+      } catch (loginError) {
+        console.error('Error creating partner login:', loginError);
+      }
+    }
 
     return NextResponse.json({ partner: updatedPartner });
   } catch (error: any) {

@@ -1,16 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { verifyInternalKey } from '../../../../lib/internalAuth';
 import prisma from '../../../../lib/prisma';
 import { notifyAllOrgUsers } from '../../../../lib/notifications';
 
 export async function POST(request: NextRequest) {
+  // Internal callers only (lib/scheduler.ts, lib/emailRecovery.ts); fails closed without INTERNAL_API_KEY.
+  if (!verifyInternalKey(request)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
-    const authHeader = request.headers.get('authorization');
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
-
-    if (authHeader !== `Bearer ${internalKey}`) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
     tomorrow.setHours(0, 0, 0, 0);

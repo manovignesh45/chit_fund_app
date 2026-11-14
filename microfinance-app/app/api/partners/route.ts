@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '../../../lib/prisma';
 import { getCurrentUserId } from '../../../lib/auth';
+import { ensurePartnerLoginUser } from '../../../lib/partnerLogins';
 
 export async function GET(req: NextRequest) {
   try {
@@ -131,6 +132,14 @@ export async function POST(req: NextRequest) {
         createdById: userId,
       },
     });
+
+    // Give the new partner a login account (random password until the primary admin sets
+    // one on /users). Only partners of the primary admin get one; failure must not undo the partner.
+    try {
+      await ensurePartnerLoginUser(partner.id);
+    } catch (loginError) {
+      console.error('Error creating partner login:', loginError);
+    }
 
     return NextResponse.json({ partner }, { status: 201 });
   } catch (error: any) {

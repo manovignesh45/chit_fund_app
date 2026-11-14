@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { verifyInternalKey } from '../../../../lib/internalAuth';
 import prisma from '../../../../lib/prisma';
 import { sendEmail, emailTemplates } from '../../../../lib/emailConfig';
 import { logEmailSend, getWeeklyPeriod } from '../../../../lib/emailRecovery';
@@ -8,6 +9,11 @@ import { getFinancialDataForExport, generateCommonExcelReport } from '../../../.
 
 // This endpoint handles automatic weekly email sending
 export async function POST(request: NextRequest) {
+  // Internal callers only (lib/scheduler.ts, lib/emailRecovery.ts); fails closed without INTERNAL_API_KEY.
+  if (!verifyInternalKey(request)) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   try {
     // Check if automatic weekly emails are enabled
     const isEnabled = process.env.AUTO_WEEKLY_EMAIL_ENABLED === 'true';
@@ -15,17 +21,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'Automatic weekly emails are disabled' },
         { status: 400 }
-      );
-    }
-
-    // Verify this is an internal request (for security)
-    const authHeader = request.headers.get('authorization');
-    const internalKey = process.env.INTERNAL_API_KEY || 'default-internal-key';
-
-    if (authHeader !== `Bearer ${internalKey}`) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
       );
     }
 

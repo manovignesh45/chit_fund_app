@@ -3,7 +3,7 @@ import prisma from '../../../lib/prisma';
 import { compare, hash } from 'bcrypt';
 import { SignJWT, jwtVerify } from 'jose';
 import { isPrimaryAdmin, getActorUserId } from '../../../lib/auth';
-import { findPartnerLoginUser, getLoginPartners, findUserByEmailOrUsername } from '../../../lib/partnerLogins';
+import { ensurePartnerLoginUsers, findPartnerLoginUser, getLoginPartners, findUserByEmailOrUsername } from '../../../lib/partnerLogins';
 
 async function createAuthSession(user: {
   id: number;
@@ -135,7 +135,18 @@ const handlers = {
         );
       }
 
-      return createAuthSession(user);
+      // A deactivated partner's login no longer works.
+      if (user.role === 'partner' && user.partner && !user.partner.isActive) {
+        return NextResponse.json(
+          { error: 'Invalid username/email or password' },
+          { status: 401 }
+        );
+      }
+
+      return createAuthSession({
+        ...user,
+        partner: user.partner ? { id: user.partner.id, name: user.partner.name } : null,
+      });
     } catch (error: any) {
       console.error('Login error:', error);
       return NextResponse.json(
@@ -174,7 +185,10 @@ const handlers = {
         );
       }
 
-      return createAuthSession(user);
+      return createAuthSession({
+        ...user,
+        partner: user.partner ? { id: user.partner.id, name: user.partner.name } : null,
+      });
     } catch (error) {
       console.error('Partner login error:', error);
       return NextResponse.json(
@@ -377,6 +391,14 @@ const handlers = {
       const { payload } = await jwtVerify(token, secret);
       const actorId = (payload.actorId ?? payload.id) as number;
 
+      // Partners that predate automatic login creation get theirs here (random password
+      // until the admin sets one). Failure must not hide the list.
+      try {
+        await ensurePartnerLoginUsers();
+      } catch (error) {
+        console.error('Error creating missing partner logins:', error);
+      }
+
       const users = await prisma.user.findMany({
         where: {
           OR: [
@@ -541,6 +563,50 @@ const handlers = {
     }
   },
 
+  // Primary admin sets the password of another login in their organization
+  async setUserPassword(req: NextRequest) {
+    try {
+      if (!(await isPrimaryAdmin(req))) {
+        return NextResponse.json({ error: 'Only the primary admin can set passwords' }, { status: 403 });
+      }
+
+      const primaryAdminId = await getActorUserId(req);
+      if (!primaryAdminId) {
+        return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+      }
+
+      const body = await req.json().catch(() => null);
+      const userId = parseInt(body?.userId);
+      const newPassword = body?.newPassword;
+
+      if (!userId || typeof newPassword !== 'string' || !newPassword) {
+        return NextResponse.json({ error: 'User and new password are required' }, { status: 400 });
+      }
+
+      if (newPassword.length < 8) {
+        return NextResponse.json({ error: 'New password must be at least 8 characters' }, { status: 400 });
+      }
+
+      const target = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, dataOwnerId: true } });
+      if (!target) {
+        return NextResponse.json({ error: 'User not found' }, { status: 404 });
+      }
+
+      // Same organization rule as delete-user; the admin's own password goes through change-password.
+      if (target.id === primaryAdminId || target.dataOwnerId !== primaryAdminId) {
+        return NextResponse.json({ error: 'You can only set passwords for users in your organization' }, { status: 403 });
+      }
+
+      const hashedPassword = await hash(newPassword, 10);
+      await prisma.user.update({ where: { id: target.id }, data: { password: hashedPassword } });
+
+      return NextResponse.json({ success: true });
+    } catch (error) {
+      console.error('Error setting user password:', error);
+      return NextResponse.json({ error: 'Failed to set password' }, { status: 500 });
+    }
+  },
+
   // Change the logged-in user's own password
   async changePassword(req: NextRequest) {
     try {
@@ -605,6 +671,8 @@ export async function POST(req: NextRequest) {
         return handlers.createUser(req);
       case 'delete-user':
         return handlers.deleteUser(req);
+      case 'set-user-password':
+        return handlers.setUserPassword(req);
       case 'change-password':
         return handlers.changePassword(req);
       default:
