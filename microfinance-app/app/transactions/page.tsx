@@ -9,7 +9,7 @@
  */
 import * as React from 'react';
 import dynamic from 'next/dynamic';
-import { Calculator, Database, Download, Mail, Plus } from 'lucide-react';
+import { Calculator, Download, Mail, Plus } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { toast } from '@/lib/toast';
@@ -200,7 +200,6 @@ function Transactions() {
   const [emailOpen, setEmailOpen] = React.useState<boolean | null>(null);
   const [recalcOpen, setRecalcOpen] = React.useState(false);
   const [detail, setDetail] = React.useState<TransactionRecord | null>(null);
-  const [exportingDb, setExportingDb] = React.useState(false);
 
   const exportFilters: TransactionFilters = {
     selectedPartnerId: partner ?? 'ALL',
@@ -219,32 +218,6 @@ function Transactions() {
   const exportExcel = () => {
     const params = buildTransactionFilterParams(exportFilters);
     window.open(`/api/transactions/export?${params.toString()}`, '_blank');
-  };
-
-  const exportDatabase = async () => {
-    setExportingDb(true);
-    try {
-      const response = await fetch('/api/db-backup');
-      if (!response.ok) throw new Error('Database export failed');
-      const disposition = response.headers.get('content-disposition');
-      const filename = disposition ? disposition.split('filename=')[1]?.replace(/"/g, '') : 'database-backup.zip';
-      const blob = await response.blob();
-      const href = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.style.display = 'none';
-      a.href = href;
-      a.download = filename || 'database-backup.zip';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(href);
-      document.body.removeChild(a);
-      toast.success('Database backup downloaded');
-    } catch (error) {
-      console.error('Database export failed:', error);
-      toast.error('Database export failed', { description: 'Please try again.' });
-    } finally {
-      setExportingDb(false);
-    }
   };
 
   const recalculate = async () => {
@@ -339,7 +312,6 @@ function Transactions() {
               label="More transaction actions"
               actions={[
                 { label: 'Email transactions', icon: Mail, opensDialog: true, onSelect: () => setEmailOpen(true) },
-                { label: exportingDb ? 'Exporting database…' : 'Download database backup', icon: Database, disabled: exportingDb, onSelect: () => void exportDatabase() },
                 { label: 'Recalculate all balances', icon: Calculator, separatorBefore: true, opensDialog: true, onSelect: () => setRecalcOpen(true) },
               ]}
             />

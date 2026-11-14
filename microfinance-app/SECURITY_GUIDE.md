@@ -73,8 +73,8 @@
    - Consider row-level security (RLS) in PostgreSQL
 
 3. **Regular backups**:
-   - ✅ Already implemented in `/api/db-backup`
-   - Store backups securely off-site
+   - ✅ Nightly Dokploy scheduled backups to Cloudflare R2 (off-site); see `docs/DEPLOY.md`
+   - Test a restore periodically
 
 ### Password Security
 
