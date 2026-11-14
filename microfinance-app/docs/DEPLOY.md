@@ -94,5 +94,11 @@ To tidy up after a successful deploy, run `DELETE FROM _prisma_migrations WHERE 
 
 ## Notes
 
-- **Backups:** the image has no `pg_dump` or `mysqldump`. So `/api/db-backup` and the scheduled DB-backup emails fail inside the container. The scheduled job only supports MySQL URLs anyway. Use Neon/Dokploy backups, or `pg_dump` from another host.
+- **Backups:** the app does not back up the database itself. The production database is a Dokploy Postgres service, and Dokploy's scheduled backup on that service uploads a nightly dump to Cloudflare R2. Each file is a gzipped `pg_dump` custom-format archive (`<service>_<db>_<timestamp>.sql.gz`). To restore one into a database, run:
+
+  ```sh
+  gunzip -c <file>.sql.gz | pg_restore -U postgres -d <db> --no-owner --no-acl
+  ```
+
+  Test a restore into a throwaway container first. Dokploy's Restore button writes into the live database.
 - **Writable paths:** the app runs as user `node` in `/app`. Uploads and other runtime files written under `/app` (e.g. `/app/temp`) are lost on redeploy.
