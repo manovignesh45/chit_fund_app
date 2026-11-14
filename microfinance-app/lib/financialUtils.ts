@@ -2,7 +2,8 @@
  * Financial utility functions for consistent profit calculations across the application
  */
 
-import { Loan, Repayment, ChitFund, Contribution, Auction } from '@prisma/client';
+import { Loan, Repayment, Contribution, Auction } from '@prisma/client';
+import { calculateChitPayoutCommission, CommissionFund } from './chitCommission';
 
 /**
  * Calculate profit for a loan based on its type and repayments
@@ -11,56 +12,69 @@ import { Loan, Repayment, ChitFund, Contribution, Auction } from '@prisma/client
  * @returns The calculated profit
  */
 export function calculateLoanProfit(
-  loan: Pick<Loan, 'amount' | 'interestRate' | 'documentCharge' | 'repaymentType'>,
-  repayments: Pick<Repayment, 'amount' | 'paymentType' | 'paidDate' | 'period'>[]
+  loan: Pick<Loan, 'amount' | 'interestRate' | 'interestPercentage' | 'documentCharge' | 'repaymentType' | 'loanType'>,
+  repayments: (Pick<Repayment, 'amount' | 'paymentType' | 'paidDate' | 'period'> & Partial<Pick<Repayment, 'principalComponent' | 'interestComponent'>>)[]
 ): number {
   // Document charge is always part of the profit
   const documentCharge = loan.documentCharge || 0;
+  const recoveryReceipts = repayments.filter(r => r.paymentType === 'RECOVERY');
+  const recoveryInterest = recoveryReceipts.reduce((sum, r) => sum + (r.interestComponent || 0), 0);
+  const ordinaryRepayments = repayments.filter(r => r.paymentType !== 'RECOVERY');
 
   // Different calculation based on loan type
-  if (loan.repaymentType === 'Monthly') {
+  if (loan.repaymentType === 'Monthly' && loan.loanType !== 'Reducing Balance') {
     // For monthly loans, profit comes from interest payments and document charge
 
     // Count interest-only payments
-    const interestOnlyPayments = repayments.filter(r => r.paymentType === 'interestOnly').length;
+    const interestOnlyPayments = ordinaryRepayments.filter(r => r.paymentType === 'interestOnly').length;
     const interestOnlyProfit = interestOnlyPayments * (loan.interestRate || 0);
 
     // Count regular payments (each includes interest)
-    const regularPayments = repayments.filter(r => r.paymentType !== 'interestOnly').length;
+    const regularPayments = ordinaryRepayments.filter(r => r.paymentType !== 'interestOnly').length;
     const regularPaymentsProfit = regularPayments * (loan.interestRate || 0);
 
     // Total profit is interest from all payments plus document charge
-    const totalProfit = interestOnlyProfit + regularPaymentsProfit + documentCharge;
-
-    // console.log('Monthly loan profit calculation:', {
-    //   documentCharge,
-    //   interestRate: loan.interestRate,
-    //   interestOnlyPayments,
-    //   interestOnlyProfit,
-    //   regularPayments,
-    //   regularPaymentsProfit,
-    //   totalProfit
-    // });
+    const totalProfit = interestOnlyProfit + regularPaymentsProfit + documentCharge + recoveryInterest;
 
     return totalProfit;
   } else if (loan.repaymentType === 'Weekly') {
     // For weekly loans, profit is only from document charge and any excess payments
-    const totalPaid = repayments.reduce((sum, r) => sum + (r.amount || 0), 0);
-    const loanAmount = loan.amount || 0;
+    const totalPaid = ordinaryRepayments.reduce((sum, r) => sum + (r.amount || 0), 0);
+    const loanAmount = Math.max(0, (loan.amount || 0) - recoveryReceipts.reduce((sum, r) => sum + (r.principalComponent || 0), 0));
 
     // If total paid exceeds loan amount, the excess is profit
     const profitFromPayments = totalPaid > loanAmount ? totalPaid - loanAmount : 0;
-    const totalProfit = profitFromPayments;
-
-    // console.log('Weekly loan profit calculation:', {
-    //   documentCharge,
-    //   totalPaid,
-    //   loanAmount,
-    //   profitFromPayments,
-    //   totalProfit
-    // });
+    const totalProfit = profitFromPayments + documentCharge + recoveryInterest;
 
     return totalProfit;
+  } else if (loan.loanType === 'Reducing Balance' || loan.repaymentType === 'Reducing Balance') {
+    // For reducing balance loans, profit is the sum of calculated interest from each repayment
+    let totalInterestProfit = 0;
+    let currentPrincipal = loan.amount || 0;
+    const interestPercentage = (loan as any).interestPercentage || 0;
+    const monthlyInterestRate = interestPercentage / 100 / 12;
+
+    // Sort repayments by date or period to simulate correctly
+    const sortedRepayments = [...repayments].sort((a, b) => {
+      if (recoveryReceipts.length) return new Date(a.paidDate).getTime() - new Date(b.paidDate).getTime() || a.period - b.period;
+      if (a.period && b.period) return a.period - b.period;
+      return new Date(a.paidDate).getTime() - new Date(b.paidDate).getTime();
+    });
+
+    sortedRepayments.forEach(repayment => {
+      if (repayment.paymentType === 'RECOVERY') {
+        totalInterestProfit += repayment.interestComponent || 0;
+        currentPrincipal = Math.max(0, currentPrincipal - (repayment.principalComponent || 0));
+        return;
+      }
+      const interestForThisMonth = currentPrincipal * monthlyInterestRate;
+      const principalPaid = (repayment.amount || 0) - interestForThisMonth;
+      
+      totalInterestProfit += interestForThisMonth;
+      currentPrincipal = Math.max(0, currentPrincipal - principalPaid);
+    });
+
+    return totalInterestProfit + documentCharge;
   }
 
   // Default case
@@ -75,49 +89,11 @@ export function calculateLoanProfit(
  * @returns The calculated profit
  */
 export function calculateChitFundProfit(
-  chitFund: {
-    monthlyContribution: number;
-    membersCount?: number;
-    members?: any[];
-  },
-  contributions: Pick<Contribution, 'amount'>[] = [],
-  auctions: Pick<Auction, 'amount'>[] = []
+  chitFund: CommissionFund,
+  _contributions: Pick<Contribution, 'amount'>[] = [],
+  auctions: (Pick<Auction, 'amount'> & { month?: number })[] = []
 ): number {
-  // Calculate total inflow from contributions
-  const totalInflow = contributions.reduce((sum, contribution) => sum + (contribution.amount || 0), 0);
-
-  // Calculate total outflow from auctions
-  const totalOutflow = auctions.reduce((sum, auction) => sum + (auction.amount || 0), 0);
-
-  // Get members count from either membersCount field or members array
-  const membersCount = chitFund.membersCount || (chitFund.members ? chitFund.members.length : 0);
-
-  // Calculate auction profits
-  let auctionProfit = 0;
-
-  if (auctions.length > 0) {
-    auctions.forEach(auction => {
-      // Each auction's profit is the difference between the total monthly contribution and the auction amount
-      const monthlyTotal = chitFund.monthlyContribution * membersCount;
-      const currentAuctionProfit = monthlyTotal - (auction.amount || 0);
-
-      if (currentAuctionProfit > 0) {
-        auctionProfit += currentAuctionProfit;
-      }
-    });
-  }
-
-  // If there are no auctions or the calculated profit is 0, but there's a difference between inflow and outflow,
-  // use that difference as the profit (especially for completed chit funds)
-  let contributionProfit = 0;
-  if ((auctions.length === 0 || auctionProfit === 0) && totalInflow > totalOutflow) {
-    contributionProfit = totalInflow - totalOutflow;
-  }
-
-  // Total profit is the sum of auction profit and contribution profit
-  const totalProfit = auctionProfit + contributionProfit;
-
-  return totalProfit;
+  return auctions.reduce((sum, auction) => sum + calculateChitPayoutCommission(chitFund, auction), 0);
 }
 
 /**
@@ -140,7 +116,7 @@ export function calculateChitFundProfitUpToCurrentMonth(
     chitFundType?: string;
   },
   contributions: Pick<Contribution, 'amount' | 'month'>[] = [],
-  auctions: Pick<Auction, 'amount' | 'month'>[] = []
+  auctions: (Pick<Auction, 'amount' | 'month'> & { date?: Date })[] = []
 ): number {
   // Determine the current month
   let currentMonth = chitFund.currentMonth || 1;
@@ -163,54 +139,8 @@ export function calculateChitFundProfitUpToCurrentMonth(
     }
   }
 
-  // Filter contributions and auctions up to current month only
-  const currentContributions = contributions.filter(c =>
-    !c.month || c.month <= currentMonth
-  );
-
-  const currentAuctions = auctions.filter(a =>
-    !a.month || a.month <= currentMonth
-  );
-
-  // Get members count from either membersCount field or members array
-  const membersCount = chitFund.membersCount || (chitFund.members ? chitFund.members.length : 0);
-
-  // Calculate auction profits for current auctions only
-  let auctionProfit = 0;
-
-  // For Fixed type chit funds, use the new profit calculation formula
-  if (chitFund.chitFundType === 'Fixed' && chitFund.firstMonthContribution) {
-    return calculateFixedChitFundProfit(chitFund, currentMonth, currentAuctions);
-  }
-
-  // For Auction type chit funds, use the original calculation
-  if (currentAuctions.length > 0) {
-    currentAuctions.forEach(auction => {
-      // Each auction's profit is the difference between the total monthly contribution and the auction amount
-      const monthlyTotal = chitFund.monthlyContribution * membersCount;
-      const currentAuctionProfit = monthlyTotal - (auction.amount || 0);
-
-      if (currentAuctionProfit > 0) {
-        auctionProfit += currentAuctionProfit;
-      }
-    });
-  }
-
-  // If there are no auctions or the calculated profit is 0, calculate based on current contributions vs auctions
-  let contributionProfit = 0;
-  if (currentAuctions.length === 0 || auctionProfit === 0) {
-    const totalCurrentInflow = currentContributions.reduce((sum, contribution) => sum + (contribution.amount || 0), 0);
-    const totalCurrentOutflow = currentAuctions.reduce((sum, auction) => sum + (auction.amount || 0), 0);
-
-    if (totalCurrentInflow > totalCurrentOutflow) {
-      contributionProfit = totalCurrentInflow - totalCurrentOutflow;
-    }
-  }
-
-  // Total profit is the sum of auction profit and contribution profit
-  const totalProfit = auctionProfit + contributionProfit;
-
-  return totalProfit;
+  const currentAuctions = auctions.filter(a => (!a.month || a.month <= currentMonth) && (!a.date || new Date(a.date) <= new Date()));
+  return calculateChitFundProfit(chitFund, contributions, currentAuctions);
 }
 
 /**
@@ -219,7 +149,7 @@ export function calculateChitFundProfitUpToCurrentMonth(
  * @returns The total profit from all loans
  */
 export function calculateTotalLoanProfit(
-  loans: Array<Pick<Loan, 'amount' | 'interestRate' | 'documentCharge' | 'repaymentType'> & {
+  loans: Array<Pick<Loan, 'amount' | 'interestRate' | 'interestPercentage' | 'documentCharge' | 'repaymentType' | 'loanType'> & {
     repayments: Pick<Repayment, 'amount' | 'paymentType' | 'paidDate' | 'period'>[]
   }>
 ): number {
@@ -301,62 +231,4 @@ export function calculateChitFundOutsideAmount(
 
   // Outside amount is when outflow exceeds inflow
   return totalOutflow > totalInflow ? totalOutflow - totalInflow : 0;
-}
-
-/**
- * Calculate profit for Fixed type chit funds using the new formula
- * Formula: For each auction, calculate total profit and distribute equally across all months
- * Example: Total Amount=50000, 1st Month=5000, Monthly=4800, Members=10, Duration=10
- * If 1st month fixed amount=40000, total contribution=5000+(4800*9)=48200
- * Total profit = 48200-40000 = 8200, distributed profit per month = 8200/10 = 820
- * @param chitFund The Fixed type chit fund object
- * @param currentMonth The current month to calculate up to
- * @param auctions Array of auctions that have occurred
- * @returns The calculated profit up to current month
- */
-function calculateFixedChitFundProfit(
-  chitFund: {
-    monthlyContribution: number;
-    firstMonthContribution: number;
-    membersCount?: number;
-    members?: any[];
-    duration?: number;
-    chitFundType?: string;
-  },
-  currentMonth: number,
-  auctions: Pick<Auction, 'amount' | 'month'>[] = []
-): number {
-  const membersCount = chitFund.membersCount || (chitFund.members ? chitFund.members.length : 0);
-  const duration = chitFund.duration || 1;
-
-  let totalProfit = 0;
-
-  // Calculate profit for each auction that has occurred up to current month
-  auctions.forEach(auction => {
-    const auctionMonth = auction.month || 1;
-
-    // Calculate total contribution for this auction month
-    let totalContribution: number;
-    if (auctionMonth === 1) {
-      // First month: firstMonthContribution + (monthlyContribution * (membersCount - 1))
-      totalContribution = chitFund.firstMonthContribution + (chitFund.monthlyContribution * (membersCount - 1));
-    } else {
-      // Other months: monthlyContribution * membersCount
-      totalContribution = chitFund.monthlyContribution * membersCount;
-    }
-
-    // Calculate total profit for this auction: totalContribution - auctionAmount
-    const auctionTotalProfit = totalContribution - (auction.amount || 0);
-
-    // Distribute this profit equally across all months of the duration
-    const distributedProfitPerMonth = auctionTotalProfit / duration;
-
-    // Add the distributed profit for current month only (not cumulative)
-    // Each auction contributes its distributed profit for the current month
-    if (distributedProfitPerMonth > 0) {
-      totalProfit += distributedProfitPerMonth * currentMonth;
-    }
-  });
-
-  return Math.max(0, totalProfit); // Ensure profit is not negative
 }

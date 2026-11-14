@@ -1,6 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '../../../../lib/prisma';
-import { getCurrentUserId } from '../../../../lib/auth';
+import { getCurrentUserId, getActorUserId } from '../../../../lib/auth';
+import { notifyOtherAdmins, getActorName } from '../../../../lib/notifications';
+import { updateOverdueAmountFromRepayments, calculateNextPaymentDate } from '../../../../lib/paymentSchedule';
+import { computeChitMemberDuePeriods } from '../../../../lib/duesTracker';
+import { buildDueAccounts } from '../../../../lib/duesAccounts';
+import { parseListParams, type SortTarget } from '../../../../lib/list/server';
+import { buildMeta, MAX_PAGE_SIZE } from '../../../../lib/list/types';
+
+// List-contract sort keys for the members list (stored columns, plus relation counts that
+// Postgres computes in the same query). Anything else in ?sort= is ignored.
+const MEMBER_SORTS: Record<string, SortTarget> = {
+  name: 'name',
+  contact: 'contact',
+  email: 'email',
+  createdAt: 'createdAt',
+  chitFunds: (order) => ({ chitFundMembers: { _count: order } }),
+  loans: (order) => ({ loans: { _count: order } }),
+};
+const MEMBER_SEARCH = ['name', 'contact'] as const;
+// ?has= filter: members with loans, in chit funds, or with neither.
+const MEMBER_HAS: Record<string, Record<string, unknown>> = {
+  loans: { loans: { some: {} } },
+  chits: { chitFundMembers: { some: {} } },
+  none: { loans: { none: {} }, chitFundMembers: { none: {} } },
+};
 
 // Define extended types for the membership object
 interface ChitFundMembershipWithExtras {
@@ -16,9 +40,29 @@ interface ChitFundMembershipWithExtras {
     status: string;
     currentMonth: number;
     duration: number;
+    startDate: Date;
+    monthlyContribution: number;
+    firstMonthContribution: number | null;
   };
+  contributions?: { month: number; amount: number; paidDate: Date | null; balancePaymentStatus: string | null }[];
   missedContributions?: number;
   pendingAmount?: number;
+  pendingMonths?: number[];
+  partialMonths?: { month: number; balance: number }[];
+}
+
+// Define extended type for the loan object returned in member detail
+interface LoanWithExtras {
+  id: number;
+  loanType: string;
+  amount: number;
+  status: string;
+  disbursementDate: Date;
+  remainingAmount: number;
+  overdueAmount: number;
+  missedPayments: number;
+  installmentAmount: number;
+  nextPaymentDate: Date | null;
 }
 
 // Use ISR with a 5-minute revalidation period
@@ -52,6 +96,16 @@ export async function GET(request: NextRequest) {
           );
         }
         return await getMemberDetail(request, id, currentUserId);
+      case 'dues':
+        if (!id) {
+          return NextResponse.json({ error: 'Member ID is required' }, { status: 400 });
+        }
+        return await getMemberDues(request, id, currentUserId);
+      case 'history':
+        if (!id) {
+          return NextResponse.json({ error: 'Member ID is required' }, { status: 400 });
+        }
+        return await getMemberPaymentHistory(request, id, currentUserId);
       default:
         return NextResponse.json(
           { error: 'Invalid action' },
@@ -185,7 +239,7 @@ async function getMembersList(request: NextRequest, currentUserId: number) {
   try {
     const { searchParams } = new URL(request.url);
     const page = parseInt(searchParams.get('page') || '1');
-    const pageSize = parseInt(searchParams.get('pageSize') || '10');
+    const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '10'), MAX_PAGE_SIZE);
 
     // Validate pagination parameters
     const validPage = page > 0 ? page : 1;
@@ -194,9 +248,25 @@ async function getMembersList(request: NextRequest, currentUserId: number) {
     // Calculate skip value for pagination
     const skip = (validPage - 1) * validPageSize;
 
+    // Optional search by name or phone (case-insensitive)
+    const search = (searchParams.get('search') || '').trim().slice(0, 100);
+    // Optional list-contract params (q, sort, order, has). Absent: today's query exactly.
+    const list = parseListParams(searchParams, { sortable: MEMBER_SORTS, searchable: MEMBER_SEARCH, filters: ['has'] });
+    const has = list.filters.has ? MEMBER_HAS[list.filters.has] : undefined;
+
     // Filter by the current user
-    const where = {
-      createdById: currentUserId
+    const where: any = {
+      createdById: currentUserId,
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: 'insensitive' } },
+              { contact: { contains: search } },
+            ],
+          }
+        : {}),
+      ...(list.q && !search ? list.searchWhere : {}),
+      ...(has ?? {}),
     };
 
     // Get total count for pagination
@@ -215,7 +285,7 @@ async function getMembersList(request: NextRequest, currentUserId: number) {
           }
         }
       },
-      orderBy: { name: 'asc' },
+      orderBy: list.orderBy ?? { name: 'asc' },
       skip,
       take: validPageSize,
     });
@@ -223,9 +293,11 @@ async function getMembersList(request: NextRequest, currentUserId: number) {
     return NextResponse.json({
       members,
       totalCount,
+      search,
       page: validPage,
       pageSize: validPageSize,
-      totalPages: Math.ceil(totalCount / validPageSize)
+      totalPages: Math.ceil(totalCount / validPageSize),
+      meta: buildMeta({ page: validPage, pageSize: validPageSize, totalCount, sort: list.sort, order: list.order, q: list.q ?? (search || null) }),
     });
   } catch (error) {
     console.error('Error fetching members:', error);
@@ -252,7 +324,13 @@ async function getMemberDetail(request: NextRequest, id: number, currentUserId: 
                 status: true,
                 currentMonth: true,
                 duration: true,
+                startDate: true,
+                monthlyContribution: true,
+                firstMonthContribution: true,
               },
+            },
+            contributions: {
+              select: { month: true, amount: true, paidDate: true, balancePaymentStatus: true },
             },
           },
         },
@@ -264,8 +342,15 @@ async function getMemberDetail(request: NextRequest, id: number, currentUserId: 
             status: true,
             disbursementDate: true,
             remainingAmount: true,
+            nonRecoverableAt: true,
+            nonRecoverableReason: true,
+            recoveryAmount: true,
+            recoveryInterestOutstanding: true,
+            recoveryOutcome: true,
             overdueAmount: true,
             missedPayments: true,
+            installmentAmount: true,
+            nextPaymentDate: true,
           },
         },
         _count: {
@@ -295,49 +380,29 @@ async function getMemberDetail(request: NextRequest, id: number, currentUserId: 
     // Get all contributions for this member's chit funds
     const memberWithContributions = { ...member };
 
-    // Process each chit fund membership to add missed contributions and pending amount
+    // Pending contributions due up to today, using the same rules as the Dues Tracker
+    const asOf = new Date();
+    const dueRange = { start: new Date(0), end: new Date(asOf.getFullYear(), asOf.getMonth(), asOf.getDate(), 23, 59, 59, 999) };
     for (const membership of memberWithContributions.chitFundMembers as ChitFundMembershipWithExtras[]) {
-      // Only calculate for active chit funds
-      if (membership.chitFund.status === 'Active') {
-        // Get all contributions for this member in this chit fund
-        const contributions = await prisma.contribution.findMany({
-          where: {
-            memberId: membership.id,
-            chitFundId: membership.chitFund.id,
-          },
-        });
+      const periods = membership.chitFund.status === 'Active'
+        ? computeChitMemberDuePeriods(membership.chitFund, membership.contributions || [], dueRange, asOf)
+        : [];
+      membership.missedContributions = periods.length;
+      membership.pendingAmount = Math.round(periods.reduce((sum, p) => sum + p.outstanding, 0) * 100) / 100;
+      membership.pendingMonths = periods.map((p) => p.period);
+      membership.partialMonths = periods.filter((p) => p.paid > 0).map((p) => ({ month: p.period, balance: p.outstanding }));
+      delete membership.contributions; // not needed by the client
+    }
 
-        // Calculate missed contributions
-        const currentMonth = membership.chitFund.currentMonth;
-
-        // Get all months that have contributions
-        const contributedMonths = contributions.map(c => c.month);
-
-        // Count how many months from 1 to currentMonth are missing in contributedMonths
-        let missedContributions = 0;
-        for (let month = 1; month <= currentMonth; month++) {
-          if (!contributedMonths.includes(month)) {
-            missedContributions++;
-          }
+    // Refresh loan due details so the member page never shows stale overdue/next-due data
+    for (const loan of memberWithContributions.loans as LoanWithExtras[]) {
+      if (loan.status === 'Active') {
+        const overdueResult = await updateOverdueAmountFromRepayments(loan.id);
+        if (overdueResult) {
+          loan.overdueAmount = overdueResult.overdueAmount;
+          loan.missedPayments = overdueResult.missedPayments;
         }
-
-        // Calculate pending amount based on missed contributions and any balance from partial payments
-        let pendingAmount = missedContributions * membership.contribution;
-
-        // Add any balance from partial payments
-        for (const contribution of contributions) {
-          if (contribution.balance > 0) {
-            pendingAmount += contribution.balance;
-          }
-        }
-
-        // Add these fields to the membership object
-        membership.missedContributions = missedContributions;
-        membership.pendingAmount = pendingAmount;
-      } else {
-        // For inactive chit funds, set to 0
-        membership.missedContributions = 0;
-        membership.pendingAmount = 0;
+        loan.nextPaymentDate = await calculateNextPaymentDate(loan.id);
       }
     }
 
@@ -348,6 +413,167 @@ async function getMemberDetail(request: NextRequest, id: number, currentUserId: 
       { error: 'Failed to fetch member' },
       { status: 500 }
     );
+  }
+}
+
+/** Load a member only if it belongs to the current user. */
+async function findOwnedMember(id: number, currentUserId: number) {
+  const member = await prisma.globalMember.findUnique({ where: { id }, select: { id: true, createdById: true } });
+  if (!member) return { error: NextResponse.json({ error: 'Member not found' }, { status: 404 }) };
+  if (member.createdById !== currentUserId) {
+    return { error: NextResponse.json({ error: 'You do not have permission to view this member' }, { status: 403 }) };
+  }
+  return { member };
+}
+
+// Handler for a member's pending dues (overdue + upcoming within horizonDays)
+async function getMemberDues(request: NextRequest, id: number, currentUserId: number) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const horizonDays = Number(searchParams.get('horizonDays') ?? 30);
+    if (!Number.isInteger(horizonDays) || horizonDays < 0 || horizonDays > 366) {
+      return NextResponse.json({ error: 'Invalid horizonDays' }, { status: 400 });
+    }
+
+    const owned = await findOwnedMember(id, currentUserId);
+    if (owned.error) return owned.error;
+
+    const [{ accounts, summary }, lastContribution, lastRepayment] = await Promise.all([
+      buildDueAccounts(prisma, currentUserId, { horizonDays, globalMemberId: id }),
+      prisma.contribution.findFirst({
+        where: { member: { globalMemberId: id }, chitFund: { createdById: currentUserId } },
+        orderBy: { paidDate: 'desc' },
+        select: { paidDate: true, amount: true },
+      }),
+      prisma.repayment.findFirst({
+        where: { loan: { borrowerId: id, createdById: currentUserId } },
+        orderBy: { paidDate: 'desc' },
+        select: { paidDate: true, amount: true },
+      }),
+    ]);
+
+    const last = [lastContribution, lastRepayment]
+      .filter(Boolean)
+      .sort((a, b) => new Date(b!.paidDate).getTime() - new Date(a!.paidDate).getTime())[0] || null;
+
+    return NextResponse.json({
+      horizonDays,
+      summary,
+      accounts,
+      lastPayment: last ? { date: last.paidDate, amount: last.amount } : null,
+    });
+  } catch (error) {
+    console.error('Error fetching member dues:', error);
+    return NextResponse.json({ error: 'Failed to fetch member dues' }, { status: 500 });
+  }
+}
+
+// Handler for a member's combined contribution + repayment history, newest first
+async function getMemberPaymentHistory(request: NextRequest, id: number, currentUserId: number) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const page = Math.max(1, parseInt(searchParams.get('page') || '1') || 1);
+    const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(searchParams.get('pageSize') || '20') || 20));
+    const kind = searchParams.get('kind'); // 'contribution' | 'repayment' | null
+    const accountKey = searchParams.get('account'); // e.g. 'loan-12' | 'chit-3'
+
+    const owned = await findOwnedMember(id, currentUserId);
+    if (owned.error) return owned.error;
+
+    const wantContributions = !(kind === 'repayment' || accountKey?.startsWith('loan-'));
+    const wantRepayments = !(kind === 'contribution' || accountKey?.startsWith('chit-'));
+    const contributionWhere = {
+      member: { globalMemberId: id },
+      chitFund: { createdById: currentUserId },
+      ...(accountKey?.startsWith('chit-') ? { chitFundId: Number(accountKey.slice(5)) } : {}),
+    };
+    const repaymentWhere = {
+      loan: { borrowerId: id, createdById: currentUserId },
+      ...(accountKey?.startsWith('loan-') ? { loanId: Number(accountKey.slice(5)) } : {}),
+    };
+
+    // Paginated in the database: the requested page of the merged, newest-first list can
+    // only contain rows from the newest (skip + pageSize) of each table, so each query takes
+    // that many; counts and the amount total come from aggregates over the same filters.
+    const takeEach = page * pageSize;
+    // Same paid date: the most recently entered first (the old order there was Postgres row order).
+    const newestFirst = [{ paidDate: 'desc' as const }, { id: 'desc' as const }];
+    const [contributions, repayments, contributionTotals, repaymentTotals] = await Promise.all([
+      wantContributions
+        ? prisma.contribution.findMany({
+            where: contributionWhere,
+            select: {
+              id: true, amount: true, month: true, paidDate: true, balance: true, notes: true,
+              chitFund: { select: { id: true, name: true } },
+              collectedBy: { select: { name: true } },
+            },
+            orderBy: newestFirst,
+            take: takeEach,
+          })
+        : Promise.resolve([]),
+      wantRepayments
+        ? prisma.repayment.findMany({
+            where: repaymentWhere,
+            select: {
+              id: true, amount: true, period: true, paidDate: true, paymentType: true,
+              loan: { select: { id: true, loanType: true, repaymentType: true } },
+              collectedBy: { select: { name: true } },
+            },
+            orderBy: newestFirst,
+            take: takeEach,
+          })
+        : Promise.resolve([]),
+      wantContributions
+        ? prisma.contribution.aggregate({ where: contributionWhere, _count: { _all: true }, _sum: { amount: true } })
+        : Promise.resolve(null),
+      wantRepayments
+        ? prisma.repayment.aggregate({ where: repaymentWhere, _count: { _all: true }, _sum: { amount: true } })
+        : Promise.resolve(null),
+    ]);
+
+    const items = [
+      ...contributions.map((c: any) => ({
+        key: `c-${c.id}`,
+        kind: 'contribution',
+        date: c.paidDate,
+        amount: c.amount,
+        accountKey: `chit-${c.chitFund.id}`,
+        accountName: c.chitFund.name,
+        periodLabel: `Month ${c.month}`,
+        balance: c.balance || 0,
+        detail: c.notes || null,
+        collectedBy: c.collectedBy?.name || null,
+        href: `/chit-funds/${c.chitFund.id}/contributions?month=${c.month}`,
+      })),
+      ...repayments.map((r: any) => ({
+        key: `r-${r.id}`,
+        kind: 'repayment',
+        date: r.paidDate,
+        amount: r.amount,
+        accountKey: `loan-${r.loan.id}`,
+        accountName: `Loan #${r.loan.id} · ${r.loan.loanType}`,
+        periodLabel: r.paymentType === 'RECOVERY' ? 'Offline recovery' : `${r.loan.repaymentType === 'Weekly' ? 'Week' : 'Installment'} ${r.period}`,
+        balance: 0,
+        detail: r.paymentType === 'RECOVERY' ? r.notes || 'Offline recovery' : r.paymentType === 'interestOnly' ? 'Interest only' : null,
+        collectedBy: r.collectedBy?.name || null,
+        href: `/loans/${r.loan.id}`,
+      })),
+    ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    const totalCount = (contributionTotals?._count._all ?? 0) + (repaymentTotals?._count._all ?? 0);
+    const totalAmount = (contributionTotals?._sum.amount ?? 0) + (repaymentTotals?._sum.amount ?? 0);
+    return NextResponse.json({
+      items: items.slice((page - 1) * pageSize, page * pageSize),
+      totalCount,
+      totalAmount: Math.round(totalAmount * 100) / 100,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(totalCount / pageSize)),
+      meta: buildMeta({ page, pageSize, totalCount }),
+    });
+  } catch (error) {
+    console.error('Error fetching member payment history:', error);
+    return NextResponse.json({ error: 'Failed to fetch payment history' }, { status: 500 });
   }
 }
 
@@ -377,6 +603,16 @@ async function createMember(request: NextRequest, currentUserId: number) {
         notes: body.notes || null,
         createdById: currentUserId,
       },
+    });
+
+    const actorUserId = (await getActorUserId(request)) ?? currentUserId;
+    const actorName = await getActorName(actorUserId);
+    await notifyOtherAdmins({
+      actorId: actorUserId,
+      type: 'member_created',
+      title: 'New Member',
+      message: `${actorName} added member "${member.name}"`,
+      link: `/members/${member.id}`,
     });
 
     return NextResponse.json(member, { status: 201 });

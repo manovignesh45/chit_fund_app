@@ -114,6 +114,19 @@ export interface Auction {
 }
 
 /**
+ * Planned auction booking (forward-looking, separate from actual auctions)
+ */
+export interface AuctionBooking {
+  id: number;
+  chitFundId: number;
+  month: number;
+  memberId: number;
+  memberName?: string;
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
+}
+
+/**
  * Chit Fund Fixed Amount interface
  */
 export interface ChitFundFixedAmount {
@@ -130,6 +143,14 @@ export interface ChitFundFixedAmount {
  * Loan interface
  */
 export interface Loan {
+  nonRecoverableAt?: Date | string | null;
+  nonRecoverableReason?: string | null;
+  nonRecoverableNotes?: string | null;
+  recoveryPrincipalAtMark?: number | null;
+  recoveryDuesAtMark?: number | null;
+  recoveryInterestOutstanding?: number;
+  recoveryAmount?: number;
+  recoveryOutcome?: string | null;
   id: number;
   borrowerId: number;
   borrower: GlobalMember;
@@ -161,7 +182,10 @@ export interface Repayment {
   loanId: number;
   amount: number;
   paidDate: Date | string;
-  paymentType: 'full' | 'interestOnly';
+  paymentType: 'full' | 'interestOnly' | 'REGULAR' | 'INTEREST_ONLY' | 'PARTIAL' | 'RECOVERY';
+  principalComponent?: number | null;
+  interestComponent?: number | null;
+  notes?: string | null;
   period: number;
   createdAt?: Date | string;
   updatedAt?: Date | string;
@@ -176,6 +200,8 @@ export interface PaymentSchedule {
   period: number;
   dueDate: Date | string;
   amount: number;
+  interestAmount?: number;
+  paidAmount?: number | null;
   status: string;
   actualPaymentDate?: Date | string | null;
   notes?: string | null;

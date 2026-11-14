@@ -1,4 +1,6 @@
 // API utility functions for client components
+import { invalidateDashboardCache } from './dashboardCache';
+import { clearAllCaches } from './query/invalidate';
 
 // Base URL for API requests
 // Use relative URL to avoid CORS issues
@@ -68,7 +70,10 @@ async function fetchAPI<T>(
       }
 
       const data = await response.json();
-      // console.log('Response data received successfully');
+      // A successful write can change the dashboard totals.
+      if (options.method && options.method.toUpperCase() !== 'GET') {
+        invalidateDashboardCache();
+      }
       return data;
     } catch (fetchError: any) {
       if (fetchError.name === 'AbortError') {
@@ -90,6 +95,34 @@ async function fetchAPI<T>(
     // console.log(`Fetch operation completed for ${url}`);
   }
 }
+
+// Chit Fund Template API functions (consolidated)
+export const chitFundTemplateAPI = {
+  getAll: (includeArchived = false) => {
+    let url = '/chit-fund-templates/consolidated?action=list';
+    if (includeArchived) url += '&includeArchived=true';
+    return fetchAPI<any>(url);
+  },
+
+  getById: (id: number) => fetchAPI<any>(`/chit-fund-templates/consolidated?action=detail&id=${id}`),
+
+  create: (data: any) => fetchAPI<any>('/chit-fund-templates/consolidated?action=create', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+
+  update: (id: number, data: any) => fetchAPI<any>(`/chit-fund-templates/consolidated?action=update&id=${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  }),
+
+  // Soft-archive by default; pass { hard: true } to attempt a permanent delete (409 if in use).
+  delete: (id: number, opts: { hard?: boolean } = {}) =>
+    fetchAPI<any>(`/chit-fund-templates/consolidated?action=delete&id=${id}${opts.hard ? '&hard=true' : ''}`, {
+      method: 'DELETE',
+      body: JSON.stringify({}),
+    }),
+};
 
 // Chit Fund API functions (consolidated)
 export const chitFundAPI = {
@@ -269,18 +302,30 @@ export const loanAPI = {
 
 // User API functions (consolidated)
 export const authAPI = {
+  // Both drop every cached query so one user never sees another user's data.
   login: (email: string, password: string) => fetchAPI<any>('/user?action=login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
+  }).then((result) => {
+    clearAllCaches();
+    return result;
   }),
 
   logout: () => fetchAPI<any>('/user?action=logout', {
     method: 'POST',
+  }).then((result) => {
+    clearAllCaches();
+    return result;
   }),
 
   getCurrentUser: () => fetchAPI<any>('/user?action=me'),
 
   register: (data: any) => fetchAPI<any>('/user?action=register', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+
+  changePassword: (data: { currentPassword: string; newPassword: string }) => fetchAPI<any>('/user?action=change-password', {
     method: 'POST',
     body: JSON.stringify(data),
   }),
@@ -390,7 +435,13 @@ export const emailAPI = {
 
 // Global Members API functions (consolidated)
 export const memberAPI = {
-  getAll: (page = 1, pageSize = 10) => fetchAPI<any>(`/members/consolidated?action=list&page=${page}&pageSize=${pageSize}`),
+  getAll: (page = 1, pageSize = 10, search = '') =>
+    fetchAPI<any>(`/members/consolidated?action=list&page=${page}&pageSize=${pageSize}${search ? `&search=${encodeURIComponent(search)}` : ''}`),
+
+  getDues: (id: number, horizonDays = 30) => fetchAPI<any>(`/members/consolidated?action=dues&id=${id}&horizonDays=${horizonDays}`),
+
+  getPaymentHistory: (id: number, { page = 1, pageSize = 20, kind = '', account = '' } = {}) =>
+    fetchAPI<any>(`/members/consolidated?action=history&id=${id}&page=${page}&pageSize=${pageSize}${kind ? `&kind=${kind}` : ''}${account ? `&account=${encodeURIComponent(account)}` : ''}`),
 
   getById: (id: number) => fetchAPI<any>(`/members/consolidated?action=detail&id=${id}`),
 

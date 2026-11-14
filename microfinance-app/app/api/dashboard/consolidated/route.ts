@@ -4,12 +4,20 @@ import { getCurrentUserId } from '../../../../lib/auth';
 import { calculateTotalLoanProfit, calculateTotalChitFundProfitUpToCurrentMonth } from '../../../../lib/financialUtils';
 import {
   calculatePeriodFinancialMetrics,
+  calculatePeriodLoanProfit,
   calculateTotalFinancialMetrics,
   createPeriodRange
 } from '../../../../lib/centralizedFinancialCalculations';
+import { autoUpdateCurrentMonths } from '../../../../lib/timeUtils';
 import { sendEmail, emailTemplates } from '../../../../lib/emailConfig';
 import * as XLSX from 'xlsx';
 import { getFinancialDataForExport as getCommonFinancialData, generateCommonExcelReport } from '../../../../lib/commonExportUtils';
+import { buildTransactionWhereClause } from '../../../../lib/transactionWhereBuilder';
+import { GET as getAggregations } from '../../transactions/aggregations/route';
+import { GET as getTransactionSummary } from '../../transactions/summary/route';
+import { GET as getMonthlyChitProfit } from '../../chit-funds/monthly-profit/route';
+import { getActivitiesList, parseActivitiesQuery, wantsActivitiesList } from '../../../../lib/activitiesList';
+import { MAX_PAGE_SIZE } from '../../../../lib/list/types';
 
 // Use ISR with a 5-minute revalidation period
 export const revalidate = 300; // 5 minutes
@@ -31,6 +39,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Auto-update current month for all active chit funds and loans
+    await autoUpdateCurrentMonths(currentUserId);
+
     // Get the action from the query string
     const { searchParams } = new URL(request.url);
     const action = searchParams.get('action');
@@ -46,14 +57,21 @@ export async function GET(request: NextRequest) {
       case 'email-export':
         return await handleEmailExport(request, currentUserId);
       case 'activities':
+        // With any list param (q, type, from, to, sort, order) the page is read in SQL
+        // and the response gains `meta`; without, the legacy handler runs unchanged.
+        if (wantsActivitiesList(searchParams)) {
+          return NextResponse.json(await getActivitiesList(currentUserId, parseActivitiesQuery(searchParams)));
+        }
         // Get pagination parameters
         const page = parseInt(searchParams.get('page') || '1', 10);
-        const pageSize = parseInt(searchParams.get('pageSize') || '10', 10);
+        const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '10', 10), MAX_PAGE_SIZE);
         const filter = searchParams.get('filter') || 'all';
 
         // Get activities with pagination
         const activitiesData = await getActivitiesWithPagination(currentUserId, page, pageSize, filter);
         return NextResponse.json(activitiesData);
+      case 'calendar-month':
+        return await getCalendarMonth(request, currentUserId);
       case 'events':
         // Get the view parameter
         const view = searchParams.get('view');
@@ -132,6 +150,66 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+/**
+ * Everything the calendar shows for one month in one request: the month's events plus the
+ * figures the page used to fetch separately (aggregations, transaction summary, chit
+ * commission from the 24-month trend, auction payouts). Each figure comes from the same
+ * handler or query as before, so the numbers are unchanged; they now run in parallel on
+ * the server instead of as five browser requests.
+ */
+async function getCalendarMonth(request: NextRequest, currentUserId: number) {
+  const { searchParams } = new URL(request.url);
+  const now = new Date();
+  const year = parseInt(searchParams.get('year') || String(now.getFullYear()), 10);
+  const month = parseInt(searchParams.get('month') || String(now.getMonth() + 1), 10);
+  if (!Number.isInteger(year) || year < 1900 || year > 3000 || !Number.isInteger(month) || month < 1 || month > 12) {
+    return NextResponse.json({ error: 'year and month must be a valid calendar month' }, { status: 400 });
+  }
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const startDate = `${year}-${pad(month)}-01`;
+  const endDate = `${year}-${pad(month)}-${pad(new Date(year, month, 0).getDate())}`;
+  const monthKey = `${year}-${pad(month)}`;
+
+  // Same handlers the page called directly, with the caller's cookies.
+  const call = async (handler: (req: NextRequest) => Promise<Response>, path: string) => {
+    const response = await handler(new NextRequest(new URL(path, request.url), { headers: request.headers }));
+    return response.ok ? response.json() : null;
+  };
+  const auctionWhere = await buildTransactionWhereClause(currentUserId, { type: 'AUCTION_PAYOUT', startDate, endDate });
+
+  const [events, aggregations, summary, chitProfit, auctionPayouts] = await Promise.all([
+    getEventsForMonth(currentUserId, year, month),
+    call(getAggregations, `/api/transactions/aggregations?startDate=${startDate}&endDate=${endDate}`),
+    call(getTransactionSummary, `/api/transactions/summary?startDate=${startDate}&endDate=${endDate}`),
+    call(getMonthlyChitProfit, `/api/chit-funds/monthly-profit?months=24`),
+    // As the page's old request: newest first, at most 1000 rows.
+    prisma.transaction.findMany({
+      where: auctionWhere,
+      orderBy: [{ createdAt: 'desc' }, { date: 'desc' }],
+      take: 1000,
+      select: { amount: true },
+    }),
+  ]);
+
+  const monthProfit = chitProfit?.months?.find((m: { key: string }) => m.key === monthKey) ?? null;
+  return NextResponse.json({
+    year,
+    month,
+    events,
+    aggregations,
+    summary: summary
+      ? {
+          totalLoanDisbursement: summary.totalLoanDisbursement,
+          totalDocumentCharges: summary.totalDocumentCharges,
+          totalTransactions: summary.totalTransactions,
+          totalAmount: summary.totalAmount,
+        }
+      : null,
+    chitCommission: monthProfit ? { commission: monthProfit.commission, auctionCount: monthProfit.auctionCount } : null,
+    auctionPayoutTotal: auctionPayouts.reduce((sum, t) => sum + Math.abs(t.amount ?? 0), 0),
+  });
 }
 
 // Helper function to get dashboard summary
@@ -268,14 +346,19 @@ async function getSummary(request: NextRequest, currentUserId: number) {
         id: true,
         amount: true,
         interestRate: true,
+        interestPercentage: true,
         documentCharge: true,
         repaymentType: true,
+        loanType: true,
         disbursementDate: true,
         remainingAmount: true,
+        status: true,
         repayments: {
           select: {
             id: true,
             amount: true,
+            principalComponent: true,
+            interestComponent: true,
             paymentType: true,
             paidDate: true,
             period: true
@@ -364,7 +447,11 @@ async function getSummary(request: NextRequest, currentUserId: number) {
     const cashOutflow = totalMetrics.totalCashOutflow;
     const totalProfit = totalMetrics.totalProfit;
     const outsideAmount = totalMetrics.totalOutsideAmount;
+    const nonRecoverablePrincipal = loansWithRepayments.filter(l => l.status === 'Non-Recoverable').reduce((sum, l) => sum + l.remainingAmount, 0);
+    const activePrincipal = loansWithRepayments.filter(l => l.status === 'Active').reduce((sum, l) => sum + l.remainingAmount, 0);
     const outsideAmountBreakdown = {
+      activeLoanRemainingAmount: activePrincipal,
+      nonRecoverableLoanRemainingAmount: nonRecoverablePrincipal,
       loanRemainingAmount: totalMetrics.loanRemainingAmount,
       chitFundOutsideAmount: totalMetrics.chitFundOutsideAmount
     };
@@ -421,6 +508,11 @@ async function getSummary(request: NextRequest, currentUserId: number) {
       investedAmount: netInvestedAmount,
       outsideAmount,
       outsideAmountBreakdown,
+      // Loan-specific flow breakdown (clear view: given vs collected back)
+      loanDisbursed: totalMetrics.loanOutflow,
+      repaymentInflow: totalMetrics.repaymentInflow,
+      loanInterestIncome: totalMetrics.interestPayments,
+      loanDocumentCharges: totalMetrics.documentCharges,
       profit: {
         total: totalProfit,
         loans: totalMetrics.loanProfit,
@@ -512,6 +604,8 @@ async function getFinancialData(request: NextRequest, currentUserId: number) {
         select: {
           amount: true,
           paidDate: true,
+          principalComponent: true,
+          interestComponent: true,
           paymentType: true
         },
         orderBy: {
@@ -657,18 +751,19 @@ async function getFinancialData(request: NextRequest, currentUserId: number) {
           id: true,
           amount: true,
           interestRate: true,
+          interestPercentage: true,
           documentCharge: true,
           repaymentType: true,
+          loanType: true,
+          disbursementDate: true,
+          remainingAmount: true,
           repayments: {
-            where: {
-              paidDate: {
-                gte: periodStart,
-                lte: periodEnd
-              }
-            },
+            where: { paidDate: { lte: periodEnd } },
             select: {
               id: true,
               amount: true,
+              principalComponent: true,
+              interestComponent: true,
               paymentType: true,
               paidDate: true,
               period: true
@@ -680,7 +775,9 @@ async function getFinancialData(request: NextRequest, currentUserId: number) {
       // console.log(`Period ${formatPeriodLabel(periodStart)}: Found ${periodLoansWithRepayments.length} loans`);
 
       // Calculate loan profit using the centralized utility function
-      const periodLoanProfit = calculateTotalLoanProfit(periodLoansWithRepayments);
+      const periodLoanProfit = calculatePeriodLoanProfit(periodLoansWithRepayments,
+        periodLoansWithRepayments.filter(loan => loan.disbursementDate >= periodStart && loan.disbursementDate <= periodEnd),
+        createPeriodRange(periodStart, periodEnd)).totalProfit;
 
       // Log individual loan profits for debugging
       /*
@@ -856,20 +953,20 @@ async function getFinancialData(request: NextRequest, currentUserId: number) {
           id: true,
           amount: true,
           interestRate: true,
+          interestPercentage: true,
           documentCharge: true,
           repaymentType: true,
+          loanType: true,
           disbursementDate: true,
           remainingAmount: true,
+          status: true,
           repayments: {
-            where: {
-              paidDate: {
-                gte: periodStart,
-                lte: periodEnd
-              }
-            },
+            where: { paidDate: { lte: periodEnd } },
             select: {
               id: true,
               amount: true,
+              principalComponent: true,
+              interestComponent: true,
               paymentType: true,
               paidDate: true,
               period: true
@@ -1094,6 +1191,8 @@ async function getActivitiesWithPagination(userId: number, page: number, pageSiz
         id: true,
         amount: true,
         paidDate: true,
+        principalComponent: true,
+        interestComponent: true,
         paymentType: true,
         period: true,
         loan: {
@@ -1512,6 +1611,9 @@ async function getUpcomingEventsForDashboard(userId: number, limit: number = 3) 
           disbursementDate: true,
           duration: true,
           repaymentType: true,
+          loanType: true,
+          interestPercentage: true,
+          remainingAmount: true,
           installmentAmount: true,
           borrower: {
             select: {
@@ -1523,7 +1625,10 @@ async function getUpcomingEventsForDashboard(userId: number, limit: number = 3) 
             select: {
               id: true,
               period: true,
+              amount: true,
               paidDate: true,
+              principalComponent: true,
+              interestComponent: true,
               paymentType: true
             }
           }
@@ -1586,7 +1691,7 @@ async function getUpcomingEventsForDashboard(userId: number, limit: number = 3) 
       for (let period = 1; period <= duration; period++) {
         const dueDate = new Date(disbursementDate);
 
-        if (repaymentType === 'Monthly') {
+        if (repaymentType === 'Monthly' || loanAny.loanType === 'Reducing Balance' || repaymentType === 'Reducing Balance') {
           dueDate.setMonth(disbursementDate.getMonth() + period);
         } else if (repaymentType === 'Weekly') {
           dueDate.setDate(disbursementDate.getDate() + (period * 7));
@@ -1603,7 +1708,14 @@ async function getUpcomingEventsForDashboard(userId: number, limit: number = 3) 
           const isDueTomorrow = dueDateNormalized.getTime() === tomorrow.getTime();
 
           // Get the installment amount
-          const installmentAmount = loanAny.installmentAmount || 0;
+          let installmentAmount = loanAny.installmentAmount || 0;
+
+          // For Reducing Balance loans, calculate interest-only installment if amount is 0
+          if ((loanAny.loanType === 'Reducing Balance' || loanAny.repaymentType === 'Reducing Balance') && installmentAmount === 0) {
+            const interestPercentage = loanAny.interestPercentage || 0;
+            const remainingAmount = loanAny.remainingAmount || 0;
+            installmentAmount = Math.round((remainingAmount * (interestPercentage / 100)) / 12);
+          }
 
           // Create event object
           const eventObj: any = {
@@ -1742,17 +1854,21 @@ async function getEventsForMonth(userId: number, year: number, month: number) {
         },
       }),
 
-      // Get all active loans to check their payment schedules
+      // Get all active and completed loans to check their payment schedules
       prisma.loan.findMany({
         where: {
-          status: 'Active',
+          status: { in: ['Active', 'Completed', 'Non-Recoverable'] },
           createdById: userId,
         },
         select: {
           id: true,
+          status: true,
           disbursementDate: true,
           duration: true,
           repaymentType: true,
+          loanType: true,
+          interestPercentage: true,
+          remainingAmount: true,
           installmentAmount: true,
           borrower: {
             select: {
@@ -1762,8 +1878,12 @@ async function getEventsForMonth(userId: number, year: number, month: number) {
           },
           repayments: {
             select: {
+              id: true,
               period: true,
+              amount: true,
               paidDate: true,
+              principalComponent: true,
+              interestComponent: true,
               paymentType: true
             }
           }
@@ -1821,7 +1941,7 @@ async function getEventsForMonth(userId: number, year: number, month: number) {
       for (let period = 1; period <= duration; period++) {
         // Calculate the due date for this period
         const dueDate = new Date(disbursementDate);
-        if (repaymentType === 'Monthly') {
+        if (repaymentType === 'Monthly' || loan.loanType === 'Reducing Balance' || repaymentType === 'Reducing Balance') {
           dueDate.setMonth(disbursementDate.getMonth() + period);
         } else if (repaymentType === 'Weekly') {
           dueDate.setDate(disbursementDate.getDate() + (period * 7));
@@ -1832,15 +1952,22 @@ async function getEventsForMonth(userId: number, year: number, month: number) {
         const isPaid = !!repayment && repayment.paidDate;
         const paymentType = repayment ? repayment.paymentType : null;
 
-        // Check if the due date is in the specified month
-        const isInMonth = dueDate >= startDate && dueDate <= endDate;
+        // For completed loans: use actual paidDate so the event appears in the
+        // month the money was truly collected, not when it was scheduled.
+        // For active loans: use the calculated dueDate (existing behaviour).
+        const eventDate = (loan.status !== 'Active' && isPaid)
+          ? new Date(repayment.paidDate)
+          : dueDate;
 
-        // Only process events that are in the specified month
-        if (isInMonth) {
-          const dueDateNormalized = new Date(dueDate);
-          dueDateNormalized.setHours(0, 0, 0, 0);
-          const isDueTomorrow = dueDateNormalized.getTime() === tomorrow.getTime();
-          const isPastDue = dueDateNormalized < today;
+        const isInMonth = eventDate >= startDate && eventDate <= endDate;
+
+        // For completed loans only show periods that were actually paid (in this month).
+        // For active loans show all periods whose due date falls in this month.
+        if (isInMonth && (loan.status === 'Active' || isPaid)) {
+          const eventDateNormalized = new Date(eventDate);
+          eventDateNormalized.setHours(0, 0, 0, 0);
+          const isDueTomorrow = eventDateNormalized.getTime() === tomorrow.getTime();
+          const isPastDue = eventDateNormalized < today;
 
           // Determine status for the event
           let status = null;
@@ -1851,15 +1978,25 @@ async function getEventsForMonth(userId: number, year: number, month: number) {
           }
 
           // Get the installment amount for this loan
-          const installmentAmount = loan.installmentAmount || 0;
+          let installmentAmount = loan.installmentAmount || 0;
+
+          // If paid, use the actual amount from repayment
+          if (isPaid && repayment && repayment.amount !== undefined) {
+            installmentAmount = repayment.amount;
+          } else if ((loan.loanType === 'Reducing Balance' || loan.repaymentType === 'Reducing Balance') && installmentAmount === 0) {
+            // For Reducing Balance loans, calculate interest-only installment if amount is 0
+            const interestPercentage = (loan as any).interestPercentage || 0;
+            const remainingAmount = (loan as any).remainingAmount || 0;
+            installmentAmount = Math.round((remainingAmount * (interestPercentage / 100)) / 12);
+          }
 
           // Create event object with type assertion to allow additional properties
           const eventObj: any = {
             id: `schedule-${loan.id}-${period}`,
             title: `${borrowerName} Loan Payment (Period ${period})`,
-            date: formatDate(dueDate),
+            date: formatDate(eventDate),
             type: 'Loan',
-            rawDate: dueDate,
+            rawDate: eventDate,
             isDueTomorrow: isDueTomorrow,
             entityId: loan.id,
             entityType: 'loan',
@@ -1883,6 +2020,18 @@ async function getEventsForMonth(userId: number, year: number, month: number) {
           }
 
           events.push(eventObj);
+        }
+      }
+      for (const receipt of loan.repayments.filter(r => r.paymentType === 'RECOVERY')) {
+        const paidDate = new Date(receipt.paidDate);
+        if (paidDate >= startDate && paidDate <= endDate) {
+          const recoveryEvent: any = {
+          id: `recovery-${loan.id}-${receipt.id}`,
+          title: `${borrowerName} Offline Recovery`, date: formatDate(paidDate), rawDate: paidDate,
+          type: 'Loan', entityType: 'loan', entityId: loan.id, borrowerId, status: 'Paid',
+          paymentType: 'RECOVERY', dueAmount: receipt.amount, isDueTomorrow: false,
+          };
+          events.push(recoveryEvent);
         }
       }
     }
@@ -1997,7 +2146,7 @@ async function exportFinancialData(request: NextRequest, currentUserId: number) 
 
     console.timeEnd(timerLabel);
 
-    return new NextResponse(excelBuffer, {
+    return new NextResponse(new Uint8Array(excelBuffer), {
       status: 200,
       headers: headers
     });
@@ -2079,6 +2228,8 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
         amount: true,
         paidDate: true,
         period: true,
+        principalComponent: true,
+        interestComponent: true,
         paymentType: true,
         loan: {
           select: {
@@ -2184,14 +2335,19 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
         id: true,
         amount: true,
         interestRate: true,
+        interestPercentage: true,
         documentCharge: true,
         repaymentType: true,
+        loanType: true,
         disbursementDate: true,
         remainingAmount: true,
+        status: true,
         repayments: {
           select: {
             id: true,
             amount: true,
+            principalComponent: true,
+            interestComponent: true,
             paymentType: true,
             paidDate: true,
             period: true

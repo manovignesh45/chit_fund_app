@@ -1,0 +1,39 @@
+/* Document body, native option lists, toasts and reduced motion */
+
+@layer base {
+  body {
+    @apply antialiased bg-background text-foreground;
+  }
+
+  /* Native <select> option lists follow the theme (kit NativeSelect). */
+  html.dark option {
+    background-color: hsl(var(--popover));
+    color: hsl(var(--popover-foreground));
+  }
+
+  /*
+   * sonner defines its own --success-text, --info-border, … on the toaster (used only
+   * by its richColors mode, which we do not use). They shadow our HSL-channel tokens
+   * of the same names inside toasts, so restore ours there.
+   */
+  html [data-sonner-toaster][data-sonner-theme] {
+    --success-text: inherit;
+    --success-border: inherit;
+    --warning-text: inherit;
+    --warning-border: inherit;
+    --info-text: inherit;
+    --info-border: inherit;
+  }
+
+  /* Keep motion to short fades/slides, and none when the user asks for less. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

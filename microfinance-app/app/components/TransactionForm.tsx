@@ -1,279 +1,468 @@
-"use client";
-import { useState, useEffect } from "react";
-import { usePartner } from "../contexts/PartnerContext";
-import { TRANSACTION_TYPES_CONFIG } from "../../config/config"; // Importing transaction types from config
+'use client';
 
-// Updated transaction types to include the user-friendly "Record Amount"
+/**
+ * Manual transaction entry: a partner transfer, or a credit/debit for the active partner.
+ * Three steps: edit → review (balance impact) → done. Used in the transactions page's
+ * "Record transaction" dialog and inline on the partners page.
+ *
+ * The POST body and the x-active-partner header are exactly what this form always sent;
+ * validation is lib/transactionValidation.ts (shared with the server).
+ */
+import * as React from 'react';
+import { ArrowLeftRight, CheckCircle2, Loader2, Minus, Plus } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { formatDate, formatMoney } from '@/lib/format';
+import { toast } from '@/lib/toast';
+import { usePartner } from '../contexts/PartnerContext';
+import { TRANSACTION_TYPES_CONFIG } from '../../config/config';
+import {
+  validateManualTransaction,
+  parseAmount,
+  normalizeNote,
+  NOTE_MAX_LENGTH,
+  NOTE_MIN_LENGTH,
+  NOTE_SUGGESTIONS,
+  type FieldErrors,
+} from '../../lib/transactionValidation';
+import { usePartnerBalances } from '@/lib/query/dashboard';
+import { invalidateTransactions, transactionWrites, type ManualTransactionBody } from '@/lib/query/transactions';
+import { ApiError } from '@/lib/query/fetcher';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { DateInput } from '@/components/kit/date-input';
+import { FormField } from '@/components/kit/form-field';
+import { NativeSelect } from '@/components/kit/native-select';
+import { errorMessage } from '@/components/kit/error-state';
+
 const TRANSACTION_TYPES = [
-  { value: TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER, label: "Partner-to-Partner Transfer" },
-  { value: TRANSACTION_TYPES_CONFIG.RECORD_AMOUNT, label: "Record Amount (Credit/Debit)" },
+  {
+    value: TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER,
+    label: 'Partner Transfer',
+    description: 'Move cash from one partner to another. Total balance is unchanged.',
+  },
+  {
+    value: TRANSACTION_TYPES_CONFIG.RECORD_AMOUNT,
+    label: 'Record Amount',
+    description: 'Credit or debit cash for the active partner. Changes the total balance.',
+  },
 ];
+
+const money2 = (n: number) => formatMoney(n, { decimals: 2 });
+const todayISO = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 interface TransactionFormProps {
   onSuccess?: () => void;
+  /** Shown as a "Close" button after saving (e.g. when the form is in a dialog). */
+  onClose?: () => void;
 }
 
-export default function TransactionForm({ onSuccess }: TransactionFormProps) {
+type Step = 'edit' | 'review' | 'done';
+
+interface BalanceImpact {
+  name: string;
+  before: number | null;
+  after: number | null;
+  change: number;
+}
+
+function ChoiceCards<V extends string>({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: V;
+  onChange: (value: V) => void;
+  options: { value: V; label: React.ReactNode; description: string }[];
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label={label}>
+      {options.map((o) => {
+        const active = value === o.value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(o.value)}
+            className={cn(
+              'rounded-lg border-2 p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              active ? 'border-primary bg-primary-subtle' : 'border-border hover:border-input'
+            )}
+          >
+            <span className={cn('block text-sm font-semibold', active ? 'text-primary-text' : 'text-foreground')}>{o.label}</span>
+            <span className="mt-0.5 block text-xs text-muted-foreground">{o.description}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+export default function TransactionForm({ onSuccess, onClose }: TransactionFormProps) {
   const { selectedPartner, partners } = usePartner();
+  const balancesQuery = usePartnerBalances();
+  const balances = React.useMemo(() => {
+    const map: Record<number, number> = {};
+    for (const p of balancesQuery.data?.partners ?? []) map[p.id] = p.balance ?? 0;
+    return map;
+  }, [balancesQuery.data]);
 
-  const [type, setType] = useState(TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER);
-  const [amount, setAmount] = useState("");
-  const [fromPartnerId, setFromPartnerId] = useState(selectedPartner?.id?.toString() || "");
-  const [toPartnerId, setToPartnerId] = useState("");
-  
-  // New state to manage the Credit/Debit radio buttons for "Record Amount"
-  const [adjustmentType, setAdjustmentType] = useState("credit");
+  const [type, setType] = React.useState<string>(TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER);
+  const [amount, setAmount] = React.useState('');
+  const [fromPartnerId, setFromPartnerId] = React.useState(selectedPartner?.id?.toString() || '');
+  const [toPartnerId, setToPartnerId] = React.useState('');
+  const [adjustmentType, setAdjustmentType] = React.useState<'credit' | 'debit'>('credit');
+  const [date, setDate] = React.useState(todayISO());
+  const [note, setNote] = React.useState('');
 
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [note, setNote] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [step, setStep] = React.useState<Step>('edit');
+  const [showErrors, setShowErrors] = React.useState(false);
+  const [serverFieldErrors, setServerFieldErrors] = React.useState<FieldErrors>({});
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState('');
+  const [lastSummary, setLastSummary] = React.useState<null | { title: string; impacts: BalanceImpact[]; note: string }>(null);
 
-  // Function to handle From Partner selection and auto-select To Partner
-  function handleFromPartnerChange(newFromPartnerId: string) {
-    setFromPartnerId(newFromPartnerId);
-    
-    // Auto-select a different partner for "To Partner" to prevent self-transfers
-    if (newFromPartnerId) {
-      const availableToPartners = partners.filter(p => p.id.toString() !== newFromPartnerId);
-      if (availableToPartners.length > 0) {
-        // If current toPartnerId is the same as newFromPartnerId, select a different one
-        if (toPartnerId === newFromPartnerId) {
-          setToPartnerId(availableToPartners[0].id.toString());
-        }
-        // If toPartnerId is empty or not set, select the first available partner
-        else if (!toPartnerId) {
-          setToPartnerId(availableToPartners[0].id.toString());
-        }
-        // If toPartnerId is already different, keep it as is
-      } else {
-        // No other partners available, clear toPartnerId
-        setToPartnerId("");
-      }
-    } else {
-      // If no fromPartnerId selected, clear toPartnerId
-      setToPartnerId("");
-    }
-  }
+  const isTransfer = type === TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER;
 
-  useEffect(() => {
-    handleTypeChange(type);
-  }, [selectedPartner]);
+  const pickDefaultTo = (fromId: string, currentTo: string) => {
+    if (currentTo && currentTo !== fromId) return currentTo;
+    const other = partners.find((p) => p.id.toString() !== fromId);
+    return other ? other.id.toString() : '';
+  };
 
-  function handleTypeChange(newType: string) {
+  const resetFeedback = () => {
+    setError('');
+    setServerFieldErrors({});
+  };
+
+  const handleTypeChange = (newType: string) => {
     setType(newType);
-    setError("");
-    setSuccess("");
-
+    resetFeedback();
+    setShowErrors(false);
     if (newType === TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER) {
-      const selectedPartnerId = selectedPartner?.id?.toString() || "";
-      setFromPartnerId(selectedPartnerId);
-      
-      // Auto-select a different partner for "To Partner"
-      if (selectedPartnerId) {
-        const availableToPartners = partners.filter(p => p.id.toString() !== selectedPartnerId);
-        setToPartnerId(availableToPartners.length > 0 ? availableToPartners[0].id.toString() : "");
-      } else {
-        setToPartnerId("");
-      }
-    } else if (newType === TRANSACTION_TYPES_CONFIG.RECORD_AMOUNT) {
-      // Default to crediting the active partner
-      setAdjustmentType("credit");
-      setFromPartnerId("");
-      setToPartnerId(selectedPartner?.id?.toString() || "");
+      const fromId = selectedPartner?.id?.toString() || '';
+      setFromPartnerId(fromId);
+      setToPartnerId(fromId ? pickDefaultTo(fromId, '') : '');
+    } else {
+      setAdjustmentType('credit');
     }
-  }
+  };
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setLoading(true);
-    setError("");
-    setSuccess("");
+  // As before: re-apply the type's defaults when the active partner or the partner list changes.
+  React.useEffect(() => {
+    handleTypeChange(type);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPartner, partners]);
 
-    if (type === "PARTNER_TO_PARTNER" && (!fromPartnerId || !toPartnerId)) {
-      setError("Both 'From' and 'To' partners are required for a PARTNER_TO_PARTNER.");
-      setLoading(false);
-      return;
+  const handleFromPartnerChange = (newFromId: string) => {
+    setFromPartnerId(newFromId);
+    setToPartnerId(newFromId ? pickDefaultTo(newFromId, toPartnerId) : '');
+  };
+
+  const swapPartners = () => {
+    if (!fromPartnerId || !toPartnerId) return;
+    setFromPartnerId(toPartnerId);
+    setToPartnerId(fromPartnerId);
+  };
+
+  const payload: ManualTransactionBody = React.useMemo(() => {
+    if (isTransfer) {
+      return { type, amount, date, note, from_partner_id: fromPartnerId, to_partner_id: toPartnerId };
     }
-
-    const body: { [key: string]: any } = {
-      amount: parseFloat(amount),
+    const id = selectedPartner?.id ?? null;
+    return {
+      type,
+      amount,
       date,
       note,
+      from_partner_id: adjustmentType === 'debit' ? id : null,
+      to_partner_id: adjustmentType === 'credit' ? id : null,
     };
+  }, [isTransfer, type, amount, date, note, fromPartnerId, toPartnerId, adjustmentType, selectedPartner]);
 
-    // Set the correct type and partner IDs based on the form state
-    if (type === TRANSACTION_TYPES_CONFIG.RECORD_AMOUNT) {
-      body.type = TRANSACTION_TYPES_CONFIG.RECORD_AMOUNT;
+  const validation = React.useMemo(() => validateManualTransaction(payload), [payload]);
+  const clientErrors: FieldErrors = validation.ok ? {} : (validation as { errors: FieldErrors }).errors;
+  const errors: FieldErrors = { ...(showErrors ? clientErrors : {}), ...serverFieldErrors };
 
-      if (adjustmentType === 'credit') {
-        body.to_partner_id = selectedPartner?.id;
-        body.from_partner_id = null;
-      } else { // debit
-        body.from_partner_id = selectedPartner?.id;
-        body.to_partner_id = null;
-      }
-    } else if (type === TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER) { // PARTNER_TO_PARTNER
-      body.type = TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER;
-      body.from_partner_id = fromPartnerId;
-      body.to_partner_id = toPartnerId;
+  const partnerName = (id: string | number | null | undefined) => partners.find((p) => p.id.toString() === String(id))?.name || '—';
+
+  const parsedAmount = parseAmount(amount);
+  const amountValue = parsedAmount && parsedAmount > 0 ? parsedAmount : 0;
+
+  const impacts: BalanceImpact[] = React.useMemo(() => {
+    const impact = (id: string | number | null | undefined, change: number): BalanceImpact => {
+      const before = id != null && balances[Number(id)] !== undefined ? balances[Number(id)] : null;
+      return { name: partnerName(id), before, after: before === null ? null : before + change, change };
+    };
+    if (isTransfer) return [impact(fromPartnerId, -amountValue), impact(toPartnerId, amountValue)];
+    return [impact(selectedPartner?.id, adjustmentType === 'credit' ? amountValue : -amountValue)];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTransfer, fromPartnerId, toPartnerId, selectedPartner, adjustmentType, amountValue, balances, partners]);
+
+  const goesNegative = impacts.some((i) => i.change < 0 && i.after !== null && i.after < 0);
+
+  const summaryTitle = isTransfer
+    ? `Transfer ${money2(amountValue)} from ${partnerName(fromPartnerId)} to ${partnerName(toPartnerId)}`
+    : `${adjustmentType === 'credit' ? 'Credit' : 'Debit'} ${money2(amountValue)} ${adjustmentType === 'credit' ? 'to' : 'from'} ${selectedPartner?.name || '—'}`;
+
+  const handleReview = (e: React.FormEvent) => {
+    e.preventDefault();
+    resetFeedback();
+    setShowErrors(true);
+    if (!isTransfer && !selectedPartner) {
+      setError('Select an active partner before recording an amount.');
+      return;
     }
+    if (!validation.ok) return;
+    setStep('review');
+  };
 
+  const handleConfirm = async () => {
+    if (loading) return;
+    setLoading(true);
+    resetFeedback();
     try {
-      const res = await fetch("/api/transactions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-active-partner": selectedPartner?.name || "",
-        },
-        body: JSON.stringify(body),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to record transaction");
-      }
-      setSuccess("Transaction recorded successfully!");
-      setAmount("");
-      setNote("");
-      if (onSuccess) onSuccess();
-    } catch (err: any) {
-      setError(err.message);
+      await transactionWrites.create({ ...payload, note: normalizeNote(note) }, selectedPartner?.name || '');
+      setLastSummary({ title: summaryTitle, impacts, note: normalizeNote(note) });
+      setStep('done');
+      setAmount('');
+      setNote('');
+      setShowErrors(false);
+      toast.success('Transaction recorded', { description: summaryTitle });
+      void invalidateTransactions();
+      onSuccess?.();
+    } catch (err) {
+      const body = err instanceof ApiError ? (err.body as { fieldErrors?: FieldErrors } | null) : null;
+      if (body?.fieldErrors) setServerFieldErrors(body.fieldErrors);
+      setStep('edit');
+      setError(errorMessage(err) || 'Failed to record transaction');
     } finally {
       setLoading(false);
     }
+  };
+
+  if (step === 'done' && lastSummary) {
+    return (
+      <div className="space-y-4" role="status">
+        <div className="rounded-lg border border-success-border bg-success-subtle p-4">
+          <p className="flex items-center gap-2 font-semibold text-success-text">
+            <CheckCircle2 aria-hidden="true" className="h-4 w-4" />
+            Transaction recorded
+          </p>
+          <p className="mt-1 text-sm text-foreground">{lastSummary.title}</p>
+          <p className="mt-2 text-xs text-muted-foreground">Reason: {lastSummary.note}</p>
+        </div>
+        <ImpactTable impacts={lastSummary.impacts} />
+        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+          {onClose ? (
+            <Button variant="outline" onClick={onClose}>
+              Close
+            </Button>
+          ) : null}
+          <Button onClick={() => setStep('edit')}>Record another transaction</Button>
+        </div>
+      </div>
+    );
   }
 
-  return (
-    <form className="max-w-xl mx-auto p-6 bg-white rounded-lg shadow-md space-y-4" onSubmit={handleSubmit}>
-      <h2 className="text-xl font-bold mb-4 text-gray-800">Record Manual Transaction</h2>
-
-      <div>
-        <label className="block font-medium text-gray-700">Transaction Type</label>
-        <select
-          className="w-full border-gray-300 rounded-md p-2 mt-1 shadow-sm"
-          value={type}
-          onChange={(e) => handleTypeChange(e.target.value)}
-        >
-          {TRANSACTION_TYPES.map((t) => (
-            <option key={t.value} value={t.value}>{t.label}</option>
-          ))}
-        </select>
-      </div>
-
-      <div>
-        <label className="block font-medium text-gray-700">Amount</label>
-        <input
-          type="number"
-          className="w-full border-gray-300 rounded-md p-2 mt-1 shadow-sm"
-          value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-          required
-          min="0.01"
-          step="0.01"
-          placeholder="e.g., 5000"
-        />
-      </div>
-
-      {type === TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="block font-medium text-gray-700">From Partner</label>
-            <select
-              className="w-full border-gray-300 rounded-md p-2 mt-1 shadow-sm"
-              value={fromPartnerId}
-              onChange={(e) => handleFromPartnerChange(e.target.value)}
-              required
-            >
-              <option value="">Select Partner</option>
-              {partners.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block font-medium text-gray-700">To Partner</label>
-            <select
-              className="w-full border-gray-300 rounded-md p-2 mt-1 shadow-sm"
-              value={toPartnerId}
-              onChange={(e) => setToPartnerId(e.target.value)}
-              required
-            >
-              <option value="">Select Partner</option>
-              {partners
-                .filter(p => p.id.toString() !== fromPartnerId) // Exclude the selected "From Partner"
-                .map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-            </select>
-          </div>
-        </div>
-      )}
-
-      {/* --- Restored Radio Button UI for Record Amount --- */}
-      {type === TRANSACTION_TYPES_CONFIG.RECORD_AMOUNT && (
+  if (step === 'review') {
+    return (
+      <div className="space-y-4">
         <div>
-            <label className="block font-medium text-gray-700">Adjustment Type for <span className="font-bold">{selectedPartner?.name}</span></label>
-             <div className="flex gap-6 mt-2 p-3 border border-gray-200 rounded-md">
-              <label className="flex items-center cursor-pointer">
-                <input
-                  type="radio"
-                  name="adjustmentType"
-                  value="credit"
-                  checked={adjustmentType === 'credit'}
-                  onChange={() => setAdjustmentType('credit')}
-                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
-                />
-                <span className="ml-2 text-gray-700">Credit (Add cash)</span>
-              </label>
-              <label className="flex items-center cursor-pointer">
-                <input
-                  type="radio"
-                  name="adjustmentType"
-                  value="debit"
-                  checked={adjustmentType === 'debit'}
-                  onChange={() => setAdjustmentType('debit')}
-                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300"
-                />
-                <span className="ml-2 text-gray-700">Debit (Remove cash)</span>
-              </label>
-            </div>
+          <p className="text-xs uppercase tracking-wide text-muted-foreground">Review before saving</p>
+          <p className="mt-1 text-lg font-semibold text-foreground">{summaryTitle}</p>
+        </div>
+        <dl className="grid grid-cols-3 gap-2 text-sm">
+          <dt className="text-muted-foreground">Date</dt>
+          <dd className="col-span-2 text-foreground">{formatDate(date)}</dd>
+          <dt className="text-muted-foreground">Reason</dt>
+          <dd className="col-span-2 break-words text-foreground">{normalizeNote(note)}</dd>
+          <dt className="text-muted-foreground">Entered by</dt>
+          <dd className="col-span-2 text-foreground">{selectedPartner?.name || '—'}</dd>
+        </dl>
+        <ImpactTable impacts={impacts} />
+        {goesNegative ? (
+          <p className="rounded-md border border-warning-border bg-warning-subtle p-3 text-sm text-warning-text">
+            This will leave a partner with a negative balance. Confirm only if that is intended.
+          </p>
+        ) : null}
+        {error ? <p role="alert" className="rounded-md border border-destructive-border bg-destructive-subtle p-3 text-sm text-destructive-text">{error}</p> : null}
+        <div className="flex gap-3">
+          <Button type="button" variant="outline" className="flex-1" onClick={() => setStep('edit')} disabled={loading}>
+            Edit
+          </Button>
+          <Button type="button" className="flex-1" onClick={handleConfirm} disabled={loading} autoFocus>
+            {loading ? <Loader2 aria-hidden="true" className="motion-safe:animate-spin" /> : null}
+            {loading ? 'Saving…' : 'Confirm & record'}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  const noteLength = normalizeNote(note).length;
+  const suggestions = NOTE_SUGGESTIONS[type] || [];
+  const BalanceHint = ({ balance }: { balance?: number }) =>
+    balance === undefined || balance === null || isNaN(balance) ? null : (
+      <p className="mt-1 text-xs text-muted-foreground">
+        Current balance: <span className={cn('font-medium tabular-nums', balance < 0 ? 'text-destructive-text' : 'text-foreground')}>{money2(balance)}</span>
+      </p>
+    );
+
+  return (
+    <form className="space-y-5" onSubmit={handleReview} noValidate>
+      <div className="space-y-2">
+        <span className="block text-sm font-medium text-foreground">Transaction type</span>
+        <ChoiceCards label="Transaction type" value={type} onChange={handleTypeChange} options={TRANSACTION_TYPES} />
+      </div>
+
+      {isTransfer ? (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_1fr] sm:items-start">
+          <div>
+            <FormField label="From partner" error={errors.from_partner_id} id="tf-from">
+              <NativeSelect value={fromPartnerId} onValueChange={handleFromPartnerChange} placeholder="Select partner" options={partners.map((p) => ({ value: String(p.id), label: p.name }))} />
+            </FormField>
+            <BalanceHint balance={balances[Number(fromPartnerId)]} />
+          </div>
+          <Button type="button" variant="outline" size="icon" onClick={swapPartners} aria-label="Swap from and to partners" className="mx-auto rounded-full sm:mt-7">
+            <ArrowLeftRight aria-hidden="true" className="rotate-90 sm:rotate-0" />
+          </Button>
+          <div>
+            <FormField label="To partner" error={errors.to_partner_id} id="tf-to">
+              <NativeSelect
+                value={toPartnerId}
+                onValueChange={setToPartnerId}
+                placeholder="Select partner"
+                options={partners.filter((p) => p.id.toString() !== fromPartnerId).map((p) => ({ value: String(p.id), label: p.name }))}
+              />
+            </FormField>
+            <BalanceHint balance={balances[Number(toPartnerId)]} />
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-foreground">
+            Adjustment for <span className="font-semibold">{selectedPartner?.name || '— select an active partner —'}</span>
+          </p>
+          <BalanceHint balance={selectedPartner ? balances[selectedPartner.id] : undefined} />
+          <ChoiceCards
+            label="Credit or debit"
+            value={adjustmentType}
+            onChange={(v) => setAdjustmentType(v as 'credit' | 'debit')}
+            options={[
+              { value: 'credit', label: <span className="inline-flex items-center gap-1"><Plus aria-hidden="true" className="h-3.5 w-3.5" />Credit</span>, description: 'Add cash' },
+              { value: 'debit', label: <span className="inline-flex items-center gap-1"><Minus aria-hidden="true" className="h-3.5 w-3.5" />Debit</span>, description: 'Remove cash' },
+            ]}
+          />
+          {errors.to_partner_id ? <p className="text-xs font-medium text-destructive-text">{errors.to_partner_id}</p> : null}
         </div>
       )}
 
-      <div>
-        <label className="block font-medium text-gray-700">Date</label>
-        <input
-          type="date"
-          className="w-full border-gray-300 rounded-md p-2 mt-1 shadow-sm"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          required
-        />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <FormField label="Amount" error={errors.amount} description={amountValue > 0 ? money2(amountValue) : undefined} id="tf-amount">
+          <Input
+            type="number"
+            inputMode="decimal"
+            value={amount}
+            onChange={(e) => {
+              setAmount(e.target.value);
+              setServerFieldErrors({});
+            }}
+            min="0.01"
+            step="0.01"
+            placeholder="₹ 0.00"
+          />
+        </FormField>
+        <FormField label="Date" error={errors.date} id="tf-date">
+          <DateInput value={date} max={todayISO()} onValueChange={setDate} />
+        </FormField>
       </div>
 
-      <div>
-        <label className="block font-medium text-gray-700">Note</label>
-        <textarea
-          className="w-full border-gray-300 rounded-md p-2 mt-1 shadow-sm"
+      <div className="space-y-1.5">
+        <div className="flex items-baseline justify-between">
+          <label htmlFor="tf-note" className="text-sm font-medium text-foreground">
+            Reason <span className="text-destructive-text" aria-hidden="true">*</span>
+            <span className="sr-only">(required)</span>
+          </label>
+          <span className={cn('text-xs tabular-nums', noteLength > NOTE_MAX_LENGTH ? 'text-destructive-text' : 'text-muted-foreground')}>
+            {noteLength}/{NOTE_MAX_LENGTH}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setNote((prev) => (prev.trim() ? prev : `${s}: `))}
+              className="rounded-full border px-2 py-1 text-xs text-muted-foreground hover:border-primary hover:text-primary-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+        <Textarea
+          id="tf-note"
           value={note}
-          onChange={(e) => setNote(e.target.value)}
-          rows={2}
-          placeholder="Optional: reason for transaction"
+          onChange={(e) => {
+            setNote(e.target.value);
+            setServerFieldErrors({});
+          }}
+          rows={3}
+          maxLength={NOTE_MAX_LENGTH + 50}
+          aria-required="true"
+          aria-invalid={!!errors.note}
+          aria-describedby="tf-note-help"
+          placeholder="Why is this money moving? e.g. Cash handover after Sunday collections"
         />
+        <p id="tf-note-help" className={cn('text-xs', errors.note ? 'font-medium text-destructive-text' : 'text-muted-foreground')}>
+          {errors.note || `Required (min ${NOTE_MIN_LENGTH} characters). Saved permanently with the transaction for audit.`}
+        </p>
       </div>
 
-      {error && <div className="text-red-600 font-medium p-3 bg-red-50 rounded-md">{error}</div>}
-      {success && <div className="text-green-600 font-medium p-3 bg-green-50 rounded-md">{success}</div>}
+      {error ? <p role="alert" className="rounded-md border border-destructive-border bg-destructive-subtle p-3 text-sm text-destructive-text">{error}</p> : null}
 
-      <button
-        type="submit"
-        className="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
-        disabled={loading || !amount}
-      >
-        {loading ? "Saving..." : "Record Transaction"}
-      </button>
+      <Button type="submit" className="w-full">
+        Review transaction
+      </Button>
     </form>
+  );
+}
+
+function ImpactTable({ impacts }: { impacts: BalanceImpact[] }) {
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <table className="w-full text-sm">
+        <thead className="bg-muted text-xs text-muted-foreground">
+          <tr>
+            <th className="px-3 py-2 text-left font-medium">Partner</th>
+            <th className="px-3 py-2 text-right font-medium">Before</th>
+            <th className="px-3 py-2 text-right font-medium">Change</th>
+            <th className="px-3 py-2 text-right font-medium">After</th>
+          </tr>
+        </thead>
+        <tbody>
+          {impacts.map((i) => (
+            <tr key={i.name} className="border-t">
+              <td className="px-3 py-2 text-foreground">{i.name}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{i.before === null ? '—' : money2(i.before)}</td>
+              <td className={cn('px-3 py-2 text-right font-medium tabular-nums', i.change >= 0 ? 'text-success-text' : 'text-foreground')}>
+                {i.change >= 0 ? '+' : '−'}
+                {money2(Math.abs(i.change))}
+              </td>
+              <td className={cn('px-3 py-2 text-right font-semibold tabular-nums', i.after !== null && i.after < 0 ? 'text-destructive-text' : 'text-foreground')}>
+                {i.after === null ? '—' : money2(i.after)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

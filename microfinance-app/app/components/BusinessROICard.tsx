@@ -1,78 +1,35 @@
-// @ts-nocheck
 'use client';
 
-import React from 'react';
+// Relative imports only: tests/trends-calculations.js renders this card with ts-node (no `@/` paths).
+import { formatMoney } from '../../lib/format';
 
-interface BusinessROICardProps {
-  totalProfit: number;
-  investedAmount: number;
-}
+interface BusinessROICardProps { loanProfit: number; investedAmount: number; }
 
-/**
- * Business ROI Card Component
- * Displays Return on Investment (ROI) percentage with visual indicators
- */
-export default function BusinessROICard({ totalProfit, investedAmount }: BusinessROICardProps) {
-  // Calculate ROI percentage
-  const calculateROI = (): string => {
-    if (investedAmount === 0) return '0.0';
-    const roi = (totalProfit / investedAmount) * 100;
-    return roi.toFixed(1);
-  };
-
-  const roiPercentage = calculateROI();
-
-  // Format currency for tooltip
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat("en-IN", {
-      style: "currency",
-      currency: "INR",
-      maximumFractionDigits: 0,
-    }).format(amount);
-  };
-
+/** Loan income ÷ net recorded owner capital (all-time). Unavailable without positive capital. */
+export default function BusinessROICard({ loanProfit, investedAmount }: BusinessROICardProps) {
+  const roi = investedAmount > 0 ? `${((loanProfit / investedAmount) * 100).toFixed(1)}%` : '—';
   return (
-    <div className="bg-white shadow-md rounded-lg p-4 sm:p-6 border-t-4 border-green-500">
-      <h2 className="text-lg sm:text-xl font-semibold text-gray-600 mb-2">
-        Business ROI
-      </h2>
-      
-      {/* ROI Percentage with trending up icon */}
-      <div className="flex items-center gap-2 mb-2">
-        <p className="text-3xl sm:text-4xl font-bold text-green-600">
-          {roiPercentage}%
-        </p>
-        <svg 
-          xmlns="http://www.w3.org/2000/svg" 
-          className="h-6 w-6 sm:h-8 sm:w-8 text-green-600" 
-          fill="none" 
-          viewBox="0 0 24 24" 
-          stroke="currentColor"
-        >
-          <path 
-            strokeLinecap="round" 
-            strokeLinejoin="round" 
-            strokeWidth={2} 
-            d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" 
-          />
-        </svg>
+    <section className="rounded-xl border bg-card p-4 text-card-foreground shadow-sm sm:p-6">
+      <div className="mb-3 flex justify-between gap-3">
+        <h3 className="text-base font-semibold text-foreground">Loan Return on Owner Capital</h3>
+        <span className="text-xs text-muted-foreground">All-time</span>
       </div>
-
-      {/* Subtitle */}
-      <p className="text-sm sm:text-base font-medium text-gray-500 mb-3">
-        Return on Capital
-      </p>
-
-      {/* Tooltip/Caption */}
-      <div className="bg-green-50 rounded-lg p-3 border border-green-100">
-        <p className="text-xs sm:text-sm text-gray-600">
-          💡 Net profit earned per ₹100 invested
-        </p>
-        <div className="mt-2 text-xs text-gray-500">
-          <p>Profit: {formatCurrency(totalProfit)}</p>
-          <p>Invested: {formatCurrency(investedAmount)}</p>
+      <p className={`text-3xl font-semibold tabular-nums ${loanProfit < 0 ? 'text-destructive-text' : 'text-foreground'}`}>{roi}</p>
+      <p className="mt-3 text-sm text-muted-foreground">Interest and document charges ÷ net recorded owner capital.</p>
+      <dl className="mt-4 space-y-2 text-sm">
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">Loan income</dt>
+          <dd className="font-medium tabular-nums text-foreground">{formatMoney(loanProfit)}</dd>
         </div>
-      </div>
-    </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">Net owner capital</dt>
+          <dd className="font-medium tabular-nums text-foreground">{formatMoney(investedAmount)}</dd>
+        </div>
+      </dl>
+      <p className="mt-4 text-xs text-muted-foreground">
+        Chit commission is excluded. This is a cumulative ratio, not an annual return.
+        {investedAmount <= 0 && ' Return is unavailable without positive recorded capital.'}
+      </p>
+    </section>
   );
 }

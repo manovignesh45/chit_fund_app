@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '../../../../lib/prisma';
-import { getCurrentUserId } from '../../../../lib/auth';
+import { getCurrentUserId, getActorUserId } from '../../../../lib/auth';
 import { TRANSACTION_TYPES_CONFIG } from '../../../../config/config';
 import { calculateTransactionBalance, getCurrentPartnerBalance, getCurrentTotalBalance, recalculateBalancesAfterDeletion } from '../../../../lib/balanceCalculator';
 import { calculateChitFundProfitUpToCurrentMonth, calculateChitFundOutsideAmount } from '../../../../lib/financialUtils';
+import { autoUpdateCurrentMonths, invalidateCurrentMonths } from '../../../../lib/timeUtils';
+import { notifyOtherAdmins, getActorName } from '../../../../lib/notifications';
+import { BalancePaymentError, planBalancePayment } from '../../../../lib/contributionBalance';
+import { parseListParams, type SortTarget } from '../../../../lib/list/server';
+import { buildMeta, MAX_PAGE_SIZE } from '../../../../lib/list/types';
 
 // Use ISR with a 5-minute revalidation period
 export const revalidate = 300; // 5 minutes
@@ -24,10 +29,15 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Auto-update current month for all active chit funds and loans
+    await autoUpdateCurrentMonths(currentUserId);
+
     // Route to the appropriate handler based on the action
     switch (action) {
       case 'list':
         return await getChitFundsList(request, currentUserId);
+      case 'summary':
+        return await getChitFundsSummary(currentUserId);
       case 'detail':
         if (!id) {
           return NextResponse.json(
@@ -106,6 +116,8 @@ export async function POST(request: NextRequest) {
         { status: 401 }
       );
     }
+    // A write can change which period a chit fund is in.
+    invalidateCurrentMonths(currentUserId);
 
     // Route to the appropriate handler based on the action
     switch (action) {
@@ -127,6 +139,14 @@ export async function POST(request: NextRequest) {
           );
         }
         return await addContribution(request, id, currentUserId);
+      case 'pay-contribution-balance':
+        if (!id) {
+          return NextResponse.json(
+            { error: 'Chit fund ID is required' },
+            { status: 400 }
+          );
+        }
+        return await payContributionBalance(request, id, currentUserId);
       case 'add-auction':
         if (!id) {
           return NextResponse.json(
@@ -165,6 +185,8 @@ export async function PUT(request: NextRequest) {
         { status: 401 }
       );
     }
+    // A write can change which period a chit fund is in.
+    invalidateCurrentMonths(currentUserId);
 
     // Route to the appropriate handler based on the action
     switch (action) {
@@ -231,6 +253,8 @@ export async function DELETE(request: NextRequest) {
         { status: 401 }
       );
     }
+    // A write can change which period a chit fund is in.
+    invalidateCurrentMonths(currentUserId);
 
     // Route to the appropriate handler based on the action
     switch (action) {
@@ -289,12 +313,117 @@ export async function DELETE(request: NextRequest) {
   }
 }
 
+// List-contract sort keys for the chit funds list: stored columns, plus the member count
+// (Postgres counts it in the same query). Anything else in ?sort= is ignored.
+const CHIT_FUND_SORTS: Record<string, SortTarget> = {
+  name: 'name',
+  totalAmount: 'totalAmount',
+  monthlyContribution: 'monthlyContribution',
+  duration: 'duration',
+  currentMonth: 'currentMonth',
+  startDate: 'startDate',
+  status: 'status',
+  createdAt: 'createdAt',
+  // Funds without a next auction date go last in both directions.
+  nextAuctionDate: (order) => ({ nextAuctionDate: { sort: order, nulls: 'last' } }),
+  members: (order) => ({ members: { _count: order } }),
+};
+const CHIT_FUND_SEARCH = ['name'] as const;
+
+/** What the completion rules below need from a fund (a slim select, or the full row). */
+interface FundCompletionInput {
+  id: number;
+  status: string;
+  startDate: Date;
+  duration: number;
+  _count: { members: number; auctions: number; contributions: number };
+}
+
+const FUND_COUNTS = { _count: { select: { members: true, auctions: true, contributions: true } } } as const;
+
+/**
+ * The rules that decide whether a fund is really finished (unchanged from before; they only
+ * moved out of getChitFundsList so the list can apply them to a slim candidate set or to
+ * one page of rows).
+ *
+ * Sum of still-outstanding contribution balances, per chit fund (a contribution row with a
+ * partial balance whose balancePaymentStatus is 'Paid' has already been settled through a
+ * separate payment, so it doesn't count as outstanding).
+ */
+async function fundCompletionRules(funds: FundCompletionInput[]) {
+  const pendingBalanceByFund = new Map<number, number>();
+  if (funds.length > 0) {
+    const pendingBalances = await prisma.contribution.groupBy({
+      by: ['chitFundId'],
+      where: {
+        chitFundId: { in: funds.map(cf => cf.id) },
+        balance: { gt: 0 },
+        balancePaymentStatus: { not: 'Paid' },
+      },
+      _sum: { balance: true },
+    });
+    for (const row of pendingBalances) {
+      pendingBalanceByFund.set(row.chitFundId, row._sum.balance || 0);
+    }
+  }
+
+  // How many of the fund's months have actually started yet, by calendar date — mirrors
+  // the same month-visibility rule the Contributions tab uses, so "all caught up" here
+  // means the same thing it means there.
+  const visibleMonths = (cf: FundCompletionInput) => {
+    const start = new Date(cf.startDate);
+    const now = new Date();
+    let maxVisibleMonth = 0;
+    for (let month = 1; month <= cf.duration; month++) {
+      const monthStart = new Date(start);
+      monthStart.setMonth(monthStart.getMonth() + (month - 1));
+      monthStart.setDate(1);
+      if (monthStart <= now) {
+        maxVisibleMonth = month;
+      } else {
+        break;
+      }
+    }
+    return maxVisibleMonth;
+  };
+
+  // Compare against the actual number of Member rows added (_count.members), not the
+  // membersCount field — on older chit funds that field was left mirroring `duration`
+  // and doesn't reflect who was actually enrolled.
+  const isPayoutComplete = (cf: FundCompletionInput) =>
+    cf._count.members > 0 && cf._count.auctions >= cf._count.members;
+
+  const isContributionsComplete = (cf: FundCompletionInput) =>
+    cf._count.members > 0 &&
+    cf._count.contributions >= cf._count.members * visibleMonths(cf) &&
+    (pendingBalanceByFund.get(cf.id) || 0) <= 0;
+
+  const isFundComplete = (cf: FundCompletionInput) => isPayoutComplete(cf) && isContributionsComplete(cf);
+
+  /** The ?status= rule for 'Active' / 'Completed' (other statuses filter in the database). */
+  const matchesStatus = (cf: FundCompletionInput, status: string) =>
+    status === 'Active'
+      ? cf.status === 'Active' && !isFundComplete(cf)
+      : cf.status === 'Completed' || isFundComplete(cf);
+
+  return { isContributionsComplete, matchesStatus };
+}
+
 // Handler for getting chit funds list
+//
+// With ?sort= (the list page always sends one), one page is loaded, sorted and searched in
+// the database, with the id tiebreaker. 'Active'/'Completed' need the completion rules (they
+// cannot be expressed on stored columns), so for those two the candidates are first read as
+// a slim select (ids, status, dates and counts), filtered with the same rules as before, and
+// only the requested page is then loaded in full.
+// Optional list-contract params: q (name), sort, order. Without them the rows, their order
+// and every legacy key are what this handler returned before; `meta` is added alongside.
 async function getChitFundsList(request: NextRequest, currentUserId: number) {
   const { searchParams } = new URL(request.url);
   const page = parseInt(searchParams.get('page') || '1');
-  const pageSize = parseInt(searchParams.get('pageSize') || '10');
+  const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '10'), MAX_PAGE_SIZE);
   const status = searchParams.get('status') || null;
+  const list = parseListParams(searchParams, { sortable: CHIT_FUND_SORTS, searchable: CHIT_FUND_SEARCH });
 
   // Validate pagination parameters
   const validPage = page > 0 ? page : 1;
@@ -306,40 +435,105 @@ async function getChitFundsList(request: NextRequest, currentUserId: number) {
   // Build where clause for filtering
   const where: any = {
     // Only show chit funds created by the current user
-    createdById: currentUserId
+    createdById: currentUserId,
+    ...(list.searchWhere ?? {}),
   };
 
-  if (status) {
+  // 'Upcoming' (and any other status not handled below) is a plain lifecycle flag,
+  // so it can be filtered directly in the database.
+  if (status && status !== 'Active' && status !== 'Completed') {
     where.status = status;
   }
+  const orderBy: any = list.orderBy ?? { createdAt: 'desc' };
 
-  // Get total count for pagination with filter
-  const totalCount = await prisma.chitFund.count({
-    where
-  });
+  let totalCount: number;
+  let pageRows: Awaited<ReturnType<typeof loadFundsPage>>;
+  let rules: Awaited<ReturnType<typeof fundCompletionRules>>;
 
-  // Get paginated chit funds with filter
-  const chitFunds = await prisma.chitFund.findMany({
-    where,
-    include: {
-      _count: {
-        select: { 
-          members: true,
-          auctions: true 
-        }
-      }
-    },
-    orderBy: { createdAt: 'desc' },
-    skip,
-    take: validPageSize,
-  });
+  if (status === 'Active' || status === 'Completed') {
+    // 'Active'/'Completed' can't be filtered by the stored status field alone: duration
+    // and membersCount are independent in this app, so a fund can reach its last month
+    // (or have its status auto-flipped) before every member has actually received an
+    // auction payout or paid every contribution, and vice versa. Whether the fund is
+    // actually finished is the real signal, so read slim candidates and split them in JS.
+    const candidates = await prisma.chitFund.findMany({
+      where,
+      select: { id: true, status: true, startDate: true, duration: true, ...FUND_COUNTS },
+      orderBy,
+    });
+    rules = await fundCompletionRules(candidates);
+    const matching = candidates.filter(cf => rules.matchesStatus(cf, status));
+    totalCount = matching.length;
+    const pageIds = matching.slice(skip, skip + validPageSize).map(cf => cf.id);
+    pageRows = await loadFundsPage({ id: { in: pageIds } }, undefined, undefined, undefined);
+    const position = new Map(pageIds.map((id, i) => [id, i]));
+    pageRows.sort((a, b) => (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0));
+  } else if (!list.orderBy) {
+    // No ?sort= (legacy callers): the query this handler always ran, sliced in JS. A LIMIT
+    // query may order rows with equal createdAt differently, so it is used only with a sort,
+    // which always carries the id tiebreaker.
+    const all = await loadFundsPage(where, orderBy, undefined, undefined);
+    totalCount = all.length;
+    pageRows = all.slice(skip, skip + validPageSize);
+    rules = await fundCompletionRules(pageRows);
+  } else {
+    [totalCount, pageRows] = await Promise.all([
+      prisma.chitFund.count({ where }),
+      loadFundsPage(where, orderBy, skip, validPageSize),
+    ]);
+    rules = await fundCompletionRules(pageRows);
+  }
+
+  // hasPendingContribution flags rows for a list-page indicator dot — any contribution due
+  // so far (by calendar date) that hasn't been fully collected yet, not just the current month.
+  const chitFunds = pageRows.map(cf => ({
+    ...cf,
+    hasPendingContribution: !rules.isContributionsComplete(cf),
+  }));
 
   return NextResponse.json({
     chitFunds,
     totalCount,
     page: validPage,
     pageSize: validPageSize,
-    totalPages: Math.ceil(totalCount / validPageSize)
+    totalPages: Math.ceil(totalCount / validPageSize),
+    meta: buildMeta({ page: validPage, pageSize: validPageSize, totalCount, sort: list.sort, order: list.order, q: list.q }),
+  });
+}
+
+/** Full list rows (scalar columns + counts), as the list has always returned them. */
+function loadFundsPage(where: any, orderBy: any, skip: number | undefined, take: number | undefined) {
+  return prisma.chitFund.findMany({
+    where,
+    include: FUND_COUNTS,
+    ...(orderBy ? { orderBy } : {}),
+    ...(skip !== undefined ? { skip } : {}),
+    ...(take !== undefined ? { take } : {}),
+  });
+}
+
+// Handler for the chit funds page's key figures (action=summary). The same figures the page
+// used to build from three list requests (status=Active pageSize=1, status=Upcoming
+// pageSize=1, status=Active pageSize=500): active and upcoming counts with the list's own
+// status rules, and the Active funds' member and value totals (a member total of 0 falls
+// back to membersCount, as the page did).
+async function getChitFundsSummary(currentUserId: number) {
+  const where = { createdById: currentUserId };
+  const [candidates, upcoming] = await Promise.all([
+    prisma.chitFund.findMany({
+      where,
+      select: { id: true, status: true, startDate: true, duration: true, totalAmount: true, membersCount: true, ...FUND_COUNTS },
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.chitFund.count({ where: { ...where, status: 'Upcoming' } }),
+  ]);
+  const rules = await fundCompletionRules(candidates);
+  const active = candidates.filter(cf => rules.matchesStatus(cf, 'Active'));
+  return NextResponse.json({
+    active: active.length,
+    upcoming,
+    totalMembers: active.reduce((sum, f) => sum + (f._count?.members || f.membersCount || 0), 0),
+    totalValue: active.reduce((sum, f) => sum + (f.totalAmount || 0), 0),
   });
 }
 
@@ -360,6 +554,10 @@ async function getChitFundDetail(request: NextRequest, id: number, currentUserId
         orderBy: {
           month: 'asc',
         },
+      },
+      // Template provenance (name only) — for the "Template / Custom (Legacy)" label
+      template: {
+        select: { id: true, name: true },
       },
       // Include contributions and auctions for financial calculations
       contributions: {
@@ -430,18 +628,37 @@ async function getChitFundDetail(request: NextRequest, id: number, currentUserId
   return NextResponse.json(responseData);
 }
 
-// Handler for getting members of a chit fund
+// List-contract sort keys for a fund's members: stored columns only (the missed-contribution
+// and pending-amount figures are computed below, so they cannot be sorted in SQL).
+const CHIT_MEMBER_SORTS: Record<string, SortTarget> = {
+  name: (order) => ({ globalMember: { name: order } }),
+  contact: (order) => ({ globalMember: { contact: order } }),
+  joinDate: 'joinDate',
+  contribution: 'contribution',
+};
+const CHIT_MEMBER_SEARCH = ['globalMember.name', 'globalMember.contact'] as const;
+
+// Handler for getting members of a chit fund.
+// Optional list-contract params (q, sort, order, auction=won|notwon) filter and order in SQL and
+// add `meta` next to the legacy keys. `all=1` returns every member of the fund on one page
+// (the auctions page needs all of them to know who can still win; a fund has tens of members,
+// and the per-member figures below already read every contribution of the fund).
+// With none of these params the handler runs exactly the query it always ran.
 async function getChitFundMembers(request: NextRequest, id: number, currentUserId: number) {
   const { searchParams } = new URL(request.url);
   const page = parseInt(searchParams.get('page') || '1');
-  const pageSize = parseInt(searchParams.get('pageSize') || '20');
+  const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '20'), MAX_PAGE_SIZE);
+  const all = searchParams.get('all') === '1';
+  const list = parseListParams(searchParams, { sortable: CHIT_MEMBER_SORTS, searchable: CHIT_MEMBER_SEARCH, filters: ['auction'] });
+  const auctionFilter = list.filters.auction === 'won' || list.filters.auction === 'notwon' ? list.filters.auction : null;
+  const withMeta = !!(list.q || list.sort || searchParams.has('order') || auctionFilter);
 
   // Validate pagination parameters
-  const validPage = page > 0 ? page : 1;
-  const validPageSize = pageSize > 0 ? pageSize : 10;
+  const validPage = all ? 1 : page > 0 ? page : 1;
+  const requestedPageSize = pageSize > 0 ? pageSize : 10;
 
   // Calculate skip value for pagination
-  const skip = (validPage - 1) * validPageSize;
+  const skip = (validPage - 1) * requestedPageSize;
 
   // Check if the chit fund exists
   const chitFund = await prisma.chitFund.findUnique({
@@ -463,14 +680,21 @@ async function getChitFundMembers(request: NextRequest, id: number, currentUserI
     );
   }
 
+  const memberWhere: any = {
+    chitFundId: id,
+    ...(list.searchWhere ?? {}),
+    ...(auctionFilter === 'won' ? { auctions: { some: {} } } : auctionFilter === 'notwon' ? { auctions: { none: {} } } : {}),
+  };
+
   // Get total count for pagination
   const totalCount = await prisma.member.count({
-    where: { chitFundId: id },
+    where: memberWhere,
   });
+  const validPageSize = all ? Math.max(totalCount, 1) : requestedPageSize;
 
   // Get paginated members for this chit fund
   const members = await prisma.member.findMany({
-    where: { chitFundId: id },
+    where: memberWhere,
     include: {
       globalMember: true,
       _count: {
@@ -484,9 +708,8 @@ async function getChitFundMembers(request: NextRequest, id: number, currentUserI
         take: 1, // We only need to know if they won any auction
       },
     },
-    orderBy: { joinDate: 'asc' },
-    skip,
-    take: validPageSize,
+    orderBy: list.orderBy ?? { joinDate: 'asc' },
+    ...(all ? {} : { skip, take: validPageSize }),
   });
 
   // Get all contributions for this chit fund with balance information
@@ -561,7 +784,9 @@ async function getChitFundMembers(request: NextRequest, id: number, currentUserI
     totalCount,
     page: validPage,
     pageSize: validPageSize,
-    totalPages: Math.ceil(totalCount / validPageSize)
+    totalPages: Math.ceil(totalCount / validPageSize),
+    // List metadata, only for list-contract requests (legacy callers get exactly the keys above).
+    ...(withMeta ? { meta: buildMeta({ page: validPage, pageSize: validPageSize, totalCount, sort: list.sort, order: list.order, q: list.q }) } : {}),
   });
 }
 
@@ -618,7 +843,7 @@ async function getMemberDetail(request: NextRequest, id: number, memberId: numbe
 async function getContributions(request: NextRequest, id: number, memberId: number | null, currentUserId: number) {
   const { searchParams } = new URL(request.url);
   const page = parseInt(searchParams.get('page') || '1');
-  const pageSize = parseInt(searchParams.get('pageSize') || '10');
+  const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '10'), MAX_PAGE_SIZE);
 
   // Validate pagination parameters
   const validPage = page > 0 ? page : 1;
@@ -698,6 +923,9 @@ async function getContributions(request: NextRequest, id: number, memberId: numb
       amount: true,
       paidDate: true,
       balance: true, // Include balance for outstanding calculations
+      balancePaymentStatus: true,
+      balancePaymentDate: true,
+      actualBalancePaymentDate: true,
     },
     orderBy: [
       { month: 'desc' },
@@ -788,6 +1016,19 @@ async function createChitFund(request: NextRequest, currentUserId: number) {
     }
   }
 
+  // Optional: link this fund to a template (provenance pointer only — the fund keeps
+  // its own physical columns, so the template is never read at runtime).
+  let templateId: number | null = null;
+  if (body.templateId) {
+    const template = await prisma.chitFundTemplate.findUnique({
+      where: { id: Number(body.templateId) },
+    });
+    if (!template || template.createdById !== currentUserId) {
+      return NextResponse.json({ error: 'Invalid template' }, { status: 400 });
+    }
+    templateId = template.id;
+  }
+
   // Create the chit fund
   const chitFund = await prisma.chitFund.create({
     data: {
@@ -804,6 +1045,8 @@ async function createChitFund(request: NextRequest, currentUserId: number) {
       chitFundType: body.chitFundType || 'Auction',
       // Set the creator
       createdById: currentUserId,
+      // Provenance link (nullable) — set only when instantiated from a template
+      templateId,
     }
   });
 
@@ -824,6 +1067,16 @@ async function createChitFund(request: NextRequest, currentUserId: number) {
       data: fixedAmountRecords,
     });
   }
+
+  const actorUserId = (await getActorUserId(request)) ?? currentUserId;
+  const actorName = await getActorName(actorUserId);
+  await notifyOtherAdmins({
+    actorId: actorUserId,
+    type: 'chit_fund_created',
+    title: 'New Chit Fund',
+    message: `${actorName} created chit fund "${chitFund.name}"`,
+    link: `/chit-funds/${chitFund.id}`,
+  });
 
   return NextResponse.json(chitFund, { status: 201 });
 }
@@ -1051,12 +1304,150 @@ async function addContribution(request: NextRequest, id: number, currentUserId: 
       },
     });
 
+    const actorUserId = (await getActorUserId(request)) ?? currentUserId;
+    const actorName = await getActorName(actorUserId);
+    const memberName = createdTransaction.contribution?.member?.globalMember?.name ?? 'a member';
+    await notifyOtherAdmins({
+      actorId: actorUserId,
+      type: 'contribution',
+      title: 'Chit Fund Contribution',
+      message: `${actorName} recorded a contribution of ₹${paidAmount} from ${memberName}`,
+      link: `/chit-funds/${id}/contributions`,
+    });
+
     return NextResponse.json(createdTransaction.contribution, { status: 201 });
 
   } catch (error) {
     console.error('Error in contribution creation process:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json({ error: `Failed to create contribution: ${errorMessage}` }, { status: 500 });
+  }
+}
+
+// Prisma's default 5 second limit on an interactive transaction is too tight when the database is
+// far from the app server (each statement is a network round trip), so allow these writes longer.
+const BALANCE_WRITE_TRANSACTION = { maxWait: 10000, timeout: 20000 };
+
+// Handler for paying part or all of a contribution's outstanding balance.
+// The member's single row for the month is topped up, and the cash received is recorded as its
+// own ledger entry (dated when it was received) linked back to that contribution.
+async function payContributionBalance(request: NextRequest, id: number, currentUserId: number) {
+  const body = await request.json();
+  const activePartnerName = request.headers.get('x-active-partner') || 'Me';
+
+  const contributionId = Number(body?.contributionId);
+  if (!Number.isSafeInteger(contributionId) || contributionId <= 0) {
+    return NextResponse.json({ error: 'Contribution ID is required' }, { status: 400 });
+  }
+
+  const chitFund = await prisma.chitFund.findUnique({ where: { id } });
+  if (!chitFund || chitFund.createdById !== currentUserId) {
+    return NextResponse.json({ error: 'Chit fund not found or permission denied' }, { status: 403 });
+  }
+
+  const collector = await prisma.partner.findFirst({
+    where: { name: activePartnerName, createdById: currentUserId, isActive: true },
+  });
+  if (!collector) {
+    return NextResponse.json({ error: `Partner "${activePartnerName}" not found` }, { status: 404 });
+  }
+
+  try {
+    // Read what does not need the lock before the transaction starts, so the transaction itself
+    // stays short (every statement inside it is a round trip to the database).
+    const target = await prisma.contribution.findFirst({
+      where: { id: contributionId, chitFundId: id },
+      select: { id: true, month: true, member: { select: { globalMember: { select: { name: true } } } } },
+    });
+    if (!target) throw new BalancePaymentError('Contribution not found in this chit fund', 404);
+    const memberName = target.member.globalMember.name;
+
+    const amountPaid = await prisma.$transaction(async (tx) => {
+      // Same lock the loan repayment writers take, so running balances are read and written in order
+      // and two payments against one balance cannot both pass the check below.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('partner-balance'), ${currentUserId}::integer)`;
+
+      // Re-read the amounts under the lock: this is the check that stops a balance being paid twice.
+      const existing = await tx.contribution.findFirst({
+        where: { id: contributionId, chitFundId: id },
+        select: { id: true, amount: true, balance: true, balancePaymentStatus: true, paidDate: true },
+      });
+      if (!existing) throw new BalancePaymentError('Contribution not found in this chit fund', 404);
+
+      const plan = planBalancePayment(existing, body.amount, body.paidDate);
+
+      const currentPartnerBalance = await getCurrentPartnerBalance(collector.id, currentUserId, undefined, tx);
+      const currentTotalBalance = await getCurrentTotalBalance(currentUserId, undefined, tx);
+      const balanceCalculation = calculateTransactionBalance(
+        {
+          type: TRANSACTION_TYPES_CONFIG.CHIT_CONTRIBUTION,
+          amount: plan.amount,
+          from_partner_id: null,
+          to_partner_id: collector.id,
+        },
+        collector.id,
+        currentPartnerBalance,
+        currentTotalBalance
+      );
+
+      await tx.transaction.create({
+        data: {
+          type: TRANSACTION_TYPES_CONFIG.CHIT_CONTRIBUTION,
+          amount: plan.amount,
+          date: plan.paidDate,
+          note: `Chit contribution from ${memberName} - ${chitFund.name} Month ${target.month} (balance payment)`,
+          createdById: currentUserId,
+          action_performer: collector.name,
+          entered_by: collector.name,
+          to_partner_id: collector.id,
+          partnerBalance: balanceCalculation.partnerBalance,
+          totalBalance: balanceCalculation.totalBalance,
+          balanceContributionId: existing.id,
+        },
+        select: { id: true },
+      });
+
+      await tx.contribution.update({
+        where: { id: existing.id },
+        data: {
+          amount: plan.newAmount,
+          balance: plan.newBalance,
+          balancePaymentStatus: plan.balancePaymentStatus,
+          actualBalancePaymentDate: plan.actualBalancePaymentDate,
+        },
+        select: { id: true },
+      });
+      return plan.amount;
+    }, BALANCE_WRITE_TRANSACTION);
+
+    // The payment is committed. Load the row with its relations for the response.
+    const contribution = await prisma.contribution.findUnique({
+      where: { id: contributionId },
+      include: {
+        collectedBy: true,
+        enteredBy: true,
+        member: { include: { globalMember: true } },
+      },
+    });
+
+    const actorUserId = (await getActorUserId(request)) ?? currentUserId;
+    const actorName = await getActorName(actorUserId);
+    await notifyOtherAdmins({
+      actorId: actorUserId,
+      type: 'contribution',
+      title: 'Chit Fund Contribution',
+      message: `${actorName} recorded a balance payment of ₹${amountPaid} from ${memberName}`,
+      link: `/chit-funds/${id}/contributions`,
+    });
+
+    return NextResponse.json(contribution);
+  } catch (error) {
+    if (error instanceof BalancePaymentError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    console.error('Error paying contribution balance:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: `Failed to record balance payment: ${errorMessage}` }, { status: 500 });
   }
 }
 
@@ -1162,15 +1553,36 @@ async function addAuction(request: NextRequest, id: number, currentUserId: numbe
         },
       });
 
-      // 2. Update the chit fund's current month
+      // 2. Update the chit fund's current month, and mark completed only once every
+      // enrolled member has actually received an auction payout. Duration and the
+      // actual number of members are independent in this app (multiple auctions can
+      // share a month, and the membersCount field can go stale), so neither "month
+      // reached duration" nor the membersCount field reliably signals the fund is done.
+      const auctionMonth = parseInt(body.month);
+      const [totalAuctions, totalMembers] = await Promise.all([
+        tx.auction.count({ where: { chitFundId: id } }),
+        tx.member.count({ where: { chitFundId: id } }),
+      ]);
       await tx.chitFund.update({
         where: { id },
         data: {
-          currentMonth: parseInt(body.month),
+          currentMonth: auctionMonth,
+          ...(totalMembers > 0 && totalAuctions >= totalMembers && { status: 'Completed' }),
         },
       });
 
       return [createdTransaction.auction];
+    });
+
+    const actorUserId = (await getActorUserId(request)) ?? currentUserId;
+    const actorName = await getActorName(actorUserId);
+    const winnerName = auction?.winner?.globalMember?.name ?? 'a member';
+    await notifyOtherAdmins({
+      actorId: actorUserId,
+      type: 'auction',
+      title: 'Chit Fund Auction',
+      message: `${actorName} recorded an auction payout of ₹${body.amount} to ${winnerName}`,
+      link: `/chit-funds/${id}/auctions`,
     });
 
     return NextResponse.json(auction, { status: 201 });
@@ -1665,6 +2077,9 @@ async function deleteContribution(request: NextRequest, id: number, currentUserI
   }
 
   try {
+    // Set inside the transaction callback once ledger entries have been removed; read after it commits.
+    const afterCommit: { recalculateFrom: { date: Date; id: number } | null } = { recalculateFrom: null };
+
     await prisma.$transaction(async (tx) => {
       // 1. Fetch the contribution to get its transactionId
       const contribution = await tx.contribution.findUnique({
@@ -1684,8 +2099,16 @@ async function deleteContribution(request: NextRequest, id: number, currentUserI
         throw new Error('Contribution not found or does not belong to this chit fund');
       }
 
-      const deletedTransactionDate = contribution.transaction?.date || new Date();
-      const deletedTransactionId = contribution.transaction?.id || 0;
+      // Ledger entries for later payments toward this contribution's balance go with it.
+      const balancePayments = await tx.transaction.findMany({
+        where: { balanceContributionId: contribution.id, createdById: currentUserId },
+        select: { id: true, date: true },
+      });
+      if (balancePayments.length > 0) {
+        await tx.transaction.deleteMany({
+          where: { id: { in: balancePayments.map((payment) => payment.id) } },
+        });
+      }
 
       // 2. Delete the associated transaction if it exists
       if (contribution.transactionId) {
@@ -1699,15 +2122,25 @@ async function deleteContribution(request: NextRequest, id: number, currentUserI
         where: { id: parseInt(contributionId) },
       });
 
-      // 4. Recalculate balances for all subsequent transactions
-      if (contribution.transaction) {
-        await recalculateBalancesAfterDeletion(
-          currentUserId,
-          deletedTransactionDate,
-          deletedTransactionId
-        );
+      // 4. Note where running balances have to be recalculated from: the earliest ledger entry removed.
+      const removed = [...balancePayments, ...(contribution.transaction ? [contribution.transaction] : [])];
+      if (removed.length > 0) {
+        removed.sort((a, b) => a.date.getTime() - b.date.getTime() || a.id - b.id);
+        afterCommit.recalculateFrom = { date: removed[0].date, id: removed[0].id };
       }
-    });
+    }, BALANCE_WRITE_TRANSACTION);
+
+    // 5. Recalculate balances for all subsequent transactions, once the deletion has committed.
+    // The recalculation writes through the shared client, outside this transaction. Running it
+    // before the commit meant a slow run could time the transaction out and undo the deletion
+    // while leaving the recalculated balances in place.
+    if (afterCommit.recalculateFrom) {
+      await recalculateBalancesAfterDeletion(
+        currentUserId,
+        afterCommit.recalculateFrom.date,
+        afterCommit.recalculateFrom.id
+      );
+    }
 
     return NextResponse.json({ success: true });
   } catch (error) {
@@ -1788,7 +2221,7 @@ async function deleteAuction(request: NextRequest, id: number, currentUserId: nu
 async function getAuctions(request: NextRequest, id: number, currentUserId: number) {
   const { searchParams } = new URL(request.url);
   const page = parseInt(searchParams.get('page') || '1');
-  const pageSize = parseInt(searchParams.get('pageSize') || '10');
+  const pageSize = Math.min(parseInt(searchParams.get('pageSize') || '10'), MAX_PAGE_SIZE);
 
   // Validate pagination parameters
   const validPage = page > 0 ? page : 1;

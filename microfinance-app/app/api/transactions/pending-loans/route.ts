@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "../../../../lib/prisma";
 import { getCurrentUserId } from "../../../../lib/auth";
+import { computeLoanDuePeriods, getLoanInstallment, summarizePeriods } from "../../../../lib/duesTracker";
 
 export async function GET(request: NextRequest) {
   try {
@@ -12,6 +13,11 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const startDate = new Date(searchParams.get("startDate") || "");
     const endDate = new Date(searchParams.get("endDate") || "");
+
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()) || startDate > endDate) {
+      return NextResponse.json({ error: "A valid date range is required" }, { status: 400 });
+    }
+    endDate.setUTCHours(23, 59, 59, 999);
 
     // Get active loans that have pending repayments
     const activeLoans = await prisma.loan.findMany({
@@ -26,6 +32,7 @@ export async function GET(request: NextRequest) {
         borrower: {
           select: {
             name: true,
+            contact: true,
           },
         },
         repayments: true,
@@ -33,62 +40,27 @@ export async function GET(request: NextRequest) {
     });
 
     // Calculate pending repayments for each loan in the date range
+    const range = { start: startDate, end: endDate };
+    const asOf = new Date();
     const pendingLoans = activeLoans
       .map((loan) => {
-        const periodStart = new Date(startDate);
-        const periodEnd = new Date(endDate);
-        const installment = loan.installmentAmount || 0;
-
-        // Calculate expected periods in the date range
-        const expectedPeriods: number[] = [];
-        const paidPeriods = new Set(
-          loan.repayments
-            .filter((r) => r.paidDate !== null)
-            .map((r) => r.period)
-        );
-
-        let paymentDate = new Date(loan.disbursementDate);
-        let currentPeriod = 1;
-        const loanTermEnd = new Date(loan.disbursementDate);
-
-        if (loan.repaymentType === "Weekly") {
-          loanTermEnd.setDate(loanTermEnd.getDate() + (loan.duration || 0) * 7);
-          paymentDate.setDate(paymentDate.getDate() + 7);
-
-          while (paymentDate <= periodEnd && paymentDate <= loanTermEnd) {
-            if (paymentDate >= periodStart && !paidPeriods.has(currentPeriod)) {
-              expectedPeriods.push(currentPeriod);
-            }
-            paymentDate.setDate(paymentDate.getDate() + 7);
-            currentPeriod++;
-          }
-        } else {
-          // Monthly
-          loanTermEnd.setMonth(loanTermEnd.getMonth() + (loan.duration || 0));
-          paymentDate.setMonth(paymentDate.getMonth() + 1);
-
-          while (paymentDate <= periodEnd && paymentDate <= loanTermEnd) {
-            if (paymentDate >= periodStart && !paidPeriods.has(currentPeriod)) {
-              expectedPeriods.push(currentPeriod);
-            }
-            paymentDate.setMonth(paymentDate.getMonth() + 1);
-            currentPeriod++;
-          }
-        }
-
-        // Only return loans that have pending periods
-        if (expectedPeriods.length === 0) return null;
-
-        const pendingAmount = expectedPeriods.length * installment;
+        const periods = computeLoanDuePeriods(loan, range, asOf);
+        if (periods.length === 0) return null;
+        const summary = summarizePeriods(periods);
 
         return {
           id: loan.id,
+          borrowerId: loan.borrowerId,
           borrowerName: loan.borrower.name,
+          contact: loan.borrower.contact,
           loanType: loan.loanType,
           totalAmount: loan.amount,
-          installmentAmount: installment,
-          pendingAmount,
-          pendingPeriods: expectedPeriods.length,
+          installmentAmount: getLoanInstallment(loan),
+          pendingAmount: summary.totalOutstanding,
+          pendingPeriods: periods.length,
+          overdueAmount: summary.overdueAmount,
+          maxDaysOverdue: summary.maxDaysOverdue,
+          periods,
           repaymentType: loan.repaymentType,
         };
       })
