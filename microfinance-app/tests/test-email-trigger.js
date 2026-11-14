@@ -4,7 +4,11 @@
 const fetch = require('node-fetch');
 
 const BASE_URL = process.env.NEXTAUTH_URL || process.env.VERCEL_URL || 'http://localhost:3001';
-const INTERNAL_KEY = process.env.INTERNAL_API_KEY || 'microfinance-scheduler-2024-secure-key';
+const INTERNAL_KEY = process.env.INTERNAL_API_KEY;
+if (!INTERNAL_KEY) {
+  console.error('Set INTERNAL_API_KEY (the server\'s scheduler key) before running this script.');
+  process.exit(1);
+}
 
 async function triggerMonthlyEmail() {
   console.log('🔄 Triggering monthly email...');

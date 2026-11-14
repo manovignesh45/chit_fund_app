@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '../../../lib/prisma';
-import { getCurrentUserId } from '../../../lib/auth';
+import { getCurrentUserId, isPrimaryAdmin } from '../../../lib/auth';
 import { ensurePartnerLoginUser } from '../../../lib/partnerLogins';
 
 export async function GET(req: NextRequest) {
@@ -100,6 +100,10 @@ export async function POST(req: NextRequest) {
     const userId = await getCurrentUserId(req);
     if (!userId) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    // Partner logins share the primary admin's data; only the primary admin manages partners.
+    if (!(await isPrimaryAdmin(req))) {
+      return NextResponse.json({ error: 'Only the primary admin can manage partners' }, { status: 403 });
     }
 
     const data = await req.json();

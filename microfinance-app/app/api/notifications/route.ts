@@ -11,9 +11,14 @@ export async function GET(request: NextRequest) {
     }
 
     const { searchParams } = new URL(request.url);
-    const page = parseInt(searchParams.get('page') || '1');
+    // page >= 1 and pageSize 1..50; missing or non-numeric values fall back to the defaults.
+    const atLeastOne = (value: string | null, fallback: number) => {
+      const n = parseInt(value ?? '', 10);
+      return Number.isFinite(n) && n >= 1 ? n : fallback;
+    };
+    const page = Math.min(atLeastOne(searchParams.get('page'), 1), 1_000_000);
     const pageSize = Math.min(
-      parseInt(searchParams.get('pageSize') || searchParams.get('limit') || '20'),
+      atLeastOne(searchParams.get('pageSize') || searchParams.get('limit'), 20),
       50
     );
     const unreadOnly = searchParams.get('unreadOnly') === 'true';
@@ -86,9 +91,10 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: 'Notification id is required' }, { status: 400 });
     }
 
-    const notification = await prisma.notification.findFirst({
-      where: { id: parseInt(id), userId: currentUserId },
-    });
+    const notificationId = parseInt(id);
+    const notification = Number.isFinite(notificationId)
+      ? await prisma.notification.findFirst({ where: { id: notificationId, userId: currentUserId } })
+      : null;
 
     if (!notification) {
       return NextResponse.json({ error: 'Notification not found' }, { status: 404 });

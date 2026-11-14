@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Error forcing initialization:', error);
     return NextResponse.json(
-      { error: `Failed to initialize application: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      { error: 'Failed to initialize application' },
       { status: 500 }
     );
   }

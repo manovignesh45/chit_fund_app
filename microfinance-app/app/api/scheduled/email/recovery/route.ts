@@ -135,14 +135,15 @@ export async function POST(request: NextRequest) {
         status: 'failed',
         recipients: recipients,
         isRecovery: true,
-        errorMessage: error instanceof Error ? error.message : 'Unknown error'
+        // Full error is in the server log; EmailLog rows can be read back through the API.
+        errorMessage: 'Failed to send recovery monthly email (see server log)'
       });
     } catch (logError) {
       console.error('Error logging failed recovery email:', logError);
     }
 
     return NextResponse.json(
-      { error: `Failed to send recovery monthly email: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      { error: 'Failed to send recovery monthly email' },
       { status: 500 }
     );
   }

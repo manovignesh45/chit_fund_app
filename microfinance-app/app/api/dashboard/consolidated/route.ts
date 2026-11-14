@@ -10,6 +10,7 @@ import {
 } from '../../../../lib/centralizedFinancialCalculations';
 import { autoUpdateCurrentMonths } from '../../../../lib/timeUtils';
 import { sendEmail, emailTemplates } from '../../../../lib/emailConfig';
+import { escapeHtmlMultiline } from '../../../../lib/escapeHtml';
 import * as XLSX from 'xlsx';
 import { getFinancialDataForExport as getCommonFinancialData, generateCommonExcelReport } from '../../../../lib/commonExportUtils';
 import { buildTransactionWhereClause } from '../../../../lib/transactionWhereBuilder';
@@ -3031,7 +3032,7 @@ async function handleEmailExport(request: NextRequest, currentUserId: number) {
       const customSection = `
         <div style="background-color: #fef3c7; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #f59e0b;">
           <h4 style="margin-top: 0; color: #92400e;">Additional Message:</h4>
-          <p style="color: #92400e; margin-bottom: 0;">${customMessage}</p>
+          <p style="color: #92400e; margin-bottom: 0;">${escapeHtmlMultiline(customMessage)}</p>
         </div>
       `;
       htmlContent = htmlContent.replace('</div>', customSection + '</div>');
@@ -3060,7 +3061,7 @@ async function handleEmailExport(request: NextRequest, currentUserId: number) {
   } catch (error) {
     console.error('Error in email export:', error);
     return NextResponse.json(
-      { error: `Failed to email export: ${error instanceof Error ? error.message : 'Unknown error'}` },
+      { error: 'Failed to email export' },
       { status: 500 }
     );
   }

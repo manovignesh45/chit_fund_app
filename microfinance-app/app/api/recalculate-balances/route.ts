@@ -155,9 +155,8 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('❌ Error during balance recalculation:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Failed to recalculate balances', details: errorMessage },
+      { error: 'Failed to recalculate balances' },
       { status: 500 }
     );
   }

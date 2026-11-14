@@ -9,6 +9,7 @@ import { notifyOtherAdmins, getActorName } from '../../../../lib/notifications';
 import { BalancePaymentError, planBalancePayment } from '../../../../lib/contributionBalance';
 import { parseListParams, type SortTarget } from '../../../../lib/list/server';
 import { buildMeta, MAX_PAGE_SIZE } from '../../../../lib/list/types';
+import { PublicError, errorResponse } from '../../../../lib/apiError';
 
 // Use ISR with a 5-minute revalidation period
 export const revalidate = 300; // 5 minutes
@@ -1109,10 +1110,13 @@ async function addMember(request: NextRequest, id: number, currentUserId: number
   if (body.globalMemberId) {
     // Using existing global member
 
-    // Check if the global member exists
-    const globalMember = await prisma.globalMember.findUnique({
-      where: { id: body.globalMemberId },
-    });
+    // Check if the global member exists and belongs to this account's data
+    const globalMemberId = parseInt(body.globalMemberId);
+    const globalMember = Number.isFinite(globalMemberId)
+      ? await prisma.globalMember.findFirst({
+          where: { id: globalMemberId, createdById: currentUserId },
+        })
+      : null;
 
     if (!globalMember) {
       return NextResponse.json(
@@ -1124,7 +1128,7 @@ async function addMember(request: NextRequest, id: number, currentUserId: number
     // Check if the member is already in this chit fund
     const existingMembership = await prisma.member.findFirst({
       where: {
-        globalMemberId: body.globalMemberId,
+        globalMemberId: globalMember.id,
         chitFundId: id,
       },
     });
@@ -1139,7 +1143,7 @@ async function addMember(request: NextRequest, id: number, currentUserId: number
     // Create the member
     const member = await prisma.member.create({
       data: {
-        globalMemberId: body.globalMemberId,
+        globalMemberId: globalMember.id,
         chitFundId: id,
         joinDate: new Date(),
         contribution: body.contribution || chitFund.monthlyContribution,
@@ -1318,9 +1322,7 @@ async function addContribution(request: NextRequest, id: number, currentUserId: 
     return NextResponse.json(createdTransaction.contribution, { status: 201 });
 
   } catch (error) {
-    console.error('Error in contribution creation process:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: `Failed to create contribution: ${errorMessage}` }, { status: 500 });
+    return errorResponse(error, 'Create contribution', 'Failed to create contribution');
   }
 }
 
@@ -1445,9 +1447,7 @@ async function payContributionBalance(request: NextRequest, id: number, currentU
     if (error instanceof BalancePaymentError) {
       return NextResponse.json({ error: error.message }, { status: error.status });
     }
-    console.error('Error paying contribution balance:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: `Failed to record balance payment: ${errorMessage}` }, { status: 500 });
+    return errorResponse(error, 'Record balance payment', 'Failed to record balance payment');
   }
 }
 
@@ -1587,9 +1587,7 @@ async function addAuction(request: NextRequest, id: number, currentUserId: numbe
 
     return NextResponse.json(auction, { status: 201 });
   } catch (error) {
-    console.error('Error in auction creation process:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: `Failed to create auction: ${errorMessage}` }, { status: 500 });
+    return errorResponse(error, 'Create auction', 'Failed to create auction');
   }
 }
 
@@ -1831,6 +1829,17 @@ async function updateAuction(request: NextRequest, id: number, currentUserId: nu
       { error: 'Auction not found or does not belong to this chit fund' },
       { status: 404 }
     );
+  }
+
+  // A new winner must be a member of this chit fund.
+  if (body.winnerId) {
+    const winner = await prisma.member.findFirst({
+      where: { id: parseInt(body.winnerId), chitFundId: id },
+      select: { id: true },
+    });
+    if (!winner) {
+      return NextResponse.json({ error: 'Winner not found in this chit fund' }, { status: 404 });
+    }
   }
 
   // Update the auction
@@ -2096,7 +2105,7 @@ async function deleteContribution(request: NextRequest, id: number, currentUserI
       });
 
       if (!contribution || contribution.chitFundId !== id) {
-        throw new Error('Contribution not found or does not belong to this chit fund');
+        throw new PublicError('Contribution not found or does not belong to this chit fund', 404);
       }
 
       // Ledger entries for later payments toward this contribution's balance go with it.
@@ -2144,9 +2153,7 @@ async function deleteContribution(request: NextRequest, id: number, currentUserI
 
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Error deleting contribution:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: `Failed to delete contribution: ${errorMessage}` }, { status: 500 });
+    return errorResponse(error, 'Delete contribution', 'Failed to delete contribution');
   }
 }
 
@@ -2181,7 +2188,7 @@ async function deleteAuction(request: NextRequest, id: number, currentUserId: nu
       });
 
       if (!auction || auction.chitFundId !== id) {
-        throw new Error('Auction not found or does not belong to this chit fund');
+        throw new PublicError('Auction not found or does not belong to this chit fund', 404);
       }
 
       const deletedTransactionDate = auction.transaction?.date || new Date();
@@ -2211,9 +2218,7 @@ async function deleteAuction(request: NextRequest, id: number, currentUserId: nu
 
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Error deleting auction:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: `Failed to delete auction: ${errorMessage}` }, { status: 500 });
+    return errorResponse(error, 'Delete auction', 'Failed to delete auction');
   }
 }
 

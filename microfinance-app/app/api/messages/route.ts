@@ -11,6 +11,14 @@ import {
 
 const MAX_CONTENT_LENGTH = 2000;
 const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 100;
+
+/** Positive integer query param, or null when absent or not a positive integer. */
+function positiveInt(value: string | null): number | null {
+  if (value === null || !/^\d+$/.test(value.trim())) return null;
+  const n = parseInt(value, 10);
+  return n >= 1 && n <= Number.MAX_SAFE_INTEGER ? n : null;
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -21,9 +29,16 @@ export async function GET(request: NextRequest) {
     }
 
     const { searchParams } = new URL(request.url);
-    const since = searchParams.get('since');
-    const beforeId = searchParams.get('beforeId');
-    const limit = Math.min(parseInt(searchParams.get('limit') ?? String(DEFAULT_LIMIT)), 100);
+    const sinceParam = searchParams.get('since');
+    const sinceDate = sinceParam ? new Date(sinceParam) : null;
+    if (sinceParam && Number.isNaN(sinceDate!.getTime())) {
+      return NextResponse.json({ error: 'Invalid since date' }, { status: 400 });
+    }
+    const since = sinceParam ? sinceDate : null;
+    // A beforeId that is not a positive integer is ignored (first page).
+    const beforeId = positiveInt(searchParams.get('beforeId'));
+    // limit: 1..100, default 50 when missing or not a number.
+    const limit = Math.min(positiveInt(searchParams.get('limit')) ?? DEFAULT_LIMIT, MAX_LIMIT);
     const unreadOnly = searchParams.get('unreadOnly') === 'true';
 
     const readState = await prisma.messageReadState.findUnique({
@@ -36,9 +51,9 @@ export async function GET(request: NextRequest) {
     };
 
     if (since) {
-      baseWhere.createdAt = { gt: new Date(since) };
+      baseWhere.createdAt = { gt: since };
     } else if (beforeId) {
-      baseWhere.id = { lt: parseInt(beforeId) };
+      baseWhere.id = { lt: beforeId };
     }
 
     if (unreadOnly && !since && !beforeId) {

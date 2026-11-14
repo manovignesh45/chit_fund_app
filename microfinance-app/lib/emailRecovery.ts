@@ -412,7 +412,7 @@ export async function sendRecoveryMonthlyEmail(period: string): Promise<boolean>
         status: 'failed',
         recipients: recipients,
         isRecovery: true,
-        errorMessage: error instanceof Error ? error.message : 'Unknown error'
+        errorMessage: 'Recovery email send failed (see server log)'
       });
     } catch (logError) {
       console.error('Error logging failed recovery email:', logError);
@@ -524,7 +524,7 @@ export async function sendRecoveryWeeklyEmail(period: string): Promise<boolean> 
         status: 'failed',
         recipients: recipients,
         isRecovery: true,
-        errorMessage: error instanceof Error ? error.message : 'Unknown error'
+        errorMessage: 'Recovery email send failed (see server log)'
       });
     } catch (logError) {
       console.error('Error logging failed recovery weekly email:', logError);

@@ -5,7 +5,7 @@
 # Run with: ./test-emails.sh
 
 BASE_URL="http://localhost:3000"
-INTERNAL_KEY="microfinance-scheduler-2024-secure-key"
+INTERNAL_KEY="${INTERNAL_API_KEY:?Set INTERNAL_API_KEY to the scheduler key of the server before running this script}"
 
 echo "🚀 Starting Email Test Suite..."
 echo ""

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getCurrentUserId } from '../../../lib/auth';
+import { getCurrentUserId, getActorUserId } from '../../../lib/auth';
+import prisma from '../../../lib/prisma';
 import {
   checkAndSendMissedEmails,
   findMissedMonthlyEmails,
@@ -8,6 +9,17 @@ import {
   sendRecoveryMonthlyEmail,
   sendRecoveryWeeklyEmail
 } from '../../../lib/emailRecovery';
+
+async function isSystemPrimaryAdmin(request: NextRequest): Promise<boolean> {
+  const actorId = await getActorUserId(request);
+  if (!actorId) return false;
+  const systemAdmin = await prisma.user.findFirst({
+    where: { role: 'admin', dataOwnerId: null },
+    orderBy: { id: 'asc' },
+    select: { id: true },
+  });
+  return systemAdmin?.id === actorId;
+}
 
 // GET endpoint to check missed emails and email logs
 export async function GET(request: NextRequest) {
@@ -36,8 +48,16 @@ export async function GET(request: NextRequest) {
         });
 
       case 'logs':
-        const limit = parseInt(url.searchParams.get('limit') || '50');
-        const emailType = url.searchParams.get('type') as 'monthly' | 'weekly' | undefined;
+        // EmailLog rows have no owner column: they record the system-wide scheduled emails
+        // (and their recipient addresses), which report the first primary admin's data. Only
+        // that admin may read them; partners and any other independent admin get 403.
+        if (!(await isSystemPrimaryAdmin(request))) {
+          return NextResponse.json({ error: 'Only the primary admin can view email logs' }, { status: 403 });
+        }
+        const parsedLimit = parseInt(url.searchParams.get('limit') || '50');
+        const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 50;
+        const typeParam = url.searchParams.get('type');
+        const emailType = typeParam === 'monthly' || typeParam === 'weekly' ? typeParam : undefined;
         const logs = await getEmailLogs(emailType, limit);
         
         return NextResponse.json({

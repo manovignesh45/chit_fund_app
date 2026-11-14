@@ -320,10 +320,6 @@ export const authAPI = {
 
   getCurrentUser: () => fetchAPI<any>('/user?action=me'),
 
-  register: (data: any) => fetchAPI<any>('/user?action=register', {
-    method: 'POST',
-    body: JSON.stringify(data),
-  }),
 
   changePassword: (data: { currentPassword: string; newPassword: string }) => fetchAPI<any>('/user?action=change-password', {
     method: 'POST',

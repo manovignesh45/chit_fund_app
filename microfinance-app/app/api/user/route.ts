@@ -5,6 +5,26 @@ import { SignJWT, jwtVerify } from 'jose';
 import { isPrimaryAdmin, getActorUserId } from '../../../lib/auth';
 import { ensurePartnerLoginUsers, findPartnerLoginUser, getLoginPartners, findUserByEmailOrUsername } from '../../../lib/partnerLogins';
 
+// Every failed sign-in (no such account, a role that may not sign in, an inactive partner,
+// a wrong password) gets this same 401, so the response does not reveal which accounts exist.
+const INVALID_CREDENTIALS = 'Invalid credentials';
+
+// bcrypt hash (cost 10, like real passwords) of a random value nobody knows. When no account
+// matches, the password is compared against this, so that case takes as long as a wrong password.
+const DUMMY_PASSWORD_HASH = '$2b$10$4G/.YpXzF/JnsEzXJU5cmuVW5Rl4lp6X4x.rUCd9UryauT/Gnp2Je';
+
+function invalidCredentials() {
+  return NextResponse.json({ error: INVALID_CREDENTIALS }, { status: 401 });
+}
+
+const AUTH_COOKIE = {
+  name: 'auth_token',
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  path: '/',
+  sameSite: 'strict',
+} as const;
+
 async function createAuthSession(user: {
   id: number;
   name: string;
@@ -45,13 +65,9 @@ async function createAuthSession(user: {
   });
 
   response.cookies.set({
-    name: 'auth_token',
+    ...AUTH_COOKIE,
     value: token,
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
     maxAge: 60 * 60 * 24,
-    path: '/',
-    sameSite: 'strict',
   });
 
   return response;
@@ -100,11 +116,12 @@ const handlers = {
   // Login handler — accepts email or username (partner name)
   async login(req: NextRequest) {
     try {
-      const body = await req.json();
-      const { email, password } = body;
-      const identifier = email?.trim();
+      const body = await req.json().catch(() => null);
+      const email = body?.email;
+      const password = body?.password;
+      const identifier = typeof email === 'string' ? email.trim() : '';
 
-      if (!identifier || !password) {
+      if (!identifier || typeof password !== 'string' || !password) {
         return NextResponse.json(
           { error: 'Username/email and password are required' },
           { status: 400 }
@@ -113,34 +130,15 @@ const handlers = {
 
       const user = await findUserByEmailOrUsername(identifier);
 
-      if (!user) {
-        return NextResponse.json(
-          { error: 'Invalid username/email or password' },
-          { status: 401 }
-        );
-      }
+      // Always run bcrypt, so an unknown account takes as long as a wrong password.
+      const passwordMatch = await compare(password, user?.password ?? DUMMY_PASSWORD_HASH);
 
-      if (user.role !== 'admin' && user.role !== 'partner') {
-        return NextResponse.json(
-          { error: 'Access denied. Only authorized users can log in.' },
-          { status: 403 }
-        );
-      }
-
-      const passwordMatch = await compare(password, user.password);
-      if (!passwordMatch) {
-        return NextResponse.json(
-          { error: 'Invalid username/email or password' },
-          { status: 401 }
-        );
-      }
-
+      const roleAllowed = user?.role === 'admin' || user?.role === 'partner';
       // A deactivated partner's login no longer works.
-      if (user.role === 'partner' && user.partner && !user.partner.isActive) {
-        return NextResponse.json(
-          { error: 'Invalid username/email or password' },
-          { status: 401 }
-        );
+      const inactivePartner = user?.role === 'partner' && !!user.partner && !user.partner.isActive;
+
+      if (!user || !roleAllowed || inactivePartner || !passwordMatch) {
+        return invalidCredentials();
       }
 
       return createAuthSession({
@@ -159,30 +157,22 @@ const handlers = {
   // Partner-specific login (select partner + password)
   async partnerLogin(req: NextRequest) {
     try {
-      const body = await req.json();
-      const { partnerId, password } = body;
+      const body = await req.json().catch(() => null);
+      const partnerId = parseInt(body?.partnerId);
+      const password = body?.password;
 
-      if (!partnerId || !password) {
+      if (!body?.partnerId || typeof password !== 'string' || !password) {
         return NextResponse.json(
           { error: 'Partner and password are required' },
           { status: 400 }
         );
       }
 
-      const user = await findPartnerLoginUser(parseInt(partnerId));
-      if (!user) {
-        return NextResponse.json(
-          { error: 'Partner login not found' },
-          { status: 404 }
-        );
-      }
-
-      const passwordMatch = await compare(password, user.password);
-      if (!passwordMatch) {
-        return NextResponse.json(
-          { error: 'Invalid password' },
-          { status: 401 }
-        );
+      // Only active partners of the primary admin have a usable login (findPartnerLoginUser).
+      const user = Number.isFinite(partnerId) ? await findPartnerLoginUser(partnerId) : null;
+      const passwordMatch = await compare(password, user?.password ?? DUMMY_PASSWORD_HASH);
+      if (!user || !passwordMatch) {
+        return invalidCredentials();
       }
 
       return createAuthSession({
@@ -215,12 +205,12 @@ const handlers = {
       // Create a response
       const response = NextResponse.json({ success: true });
 
-      // Clear the auth token cookie
+      // Clear the auth token cookie (same attributes as when it was set, so the browser replaces it)
       response.cookies.set({
-        name: 'auth_token',
+        ...AUTH_COOKIE,
         value: '',
         expires: new Date(0),
-        path: '/',
+        maxAge: 0,
       });
 
       return response;
@@ -293,80 +283,6 @@ const handlers = {
       return NextResponse.json(
         { error: 'Authentication failed' },
         { status: 401 }
-      );
-    }
-  },
-
-  // Register handler (if needed)
-  async register(req: NextRequest) {
-    try {
-      const body = await req.json();
-      const { name, email, password } = body;
-
-      // Validate required fields
-      if (!name || !email || !password) {
-        return NextResponse.json(
-          { error: 'Name, email, and password are required' },
-          { status: 400 }
-        );
-      }
-
-      // Check if user already exists
-      const existingUser = await prisma.user.findUnique({
-        where: { email },
-      });
-
-      if (existingUser) {
-        return NextResponse.json(
-          { error: 'User with this email already exists' },
-          { status: 409 }
-        );
-      }
-
-      // Hash the password
-      const hashedPassword = await hash(password, 10);
-
-      // Create the user with partners in a transaction
-      const user = await prisma.$transaction(async (prisma) => {
-        // Create the user
-        const newUser = await prisma.user.create({
-          data: {
-            name,
-            email,
-            password: hashedPassword,
-            role: 'user', // Default role
-          },
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            role: true,
-          },
-        });
-
-        // Create default partners for the user
-        const defaultPartners = ['Me', 'My Friend'];
-        await Promise.all(
-          defaultPartners.map((name) =>
-            prisma.partner.create({
-              data: {
-                name,
-                isActive: true,
-                createdById: newUser.id,
-              },
-            })
-          )
-        );
-
-        return newUser;
-      });
-
-      return NextResponse.json(user, { status: 201 });
-    } catch (error) {
-      console.error('Registration error:', error);
-      return NextResponse.json(
-        { error: 'An error occurred during registration' },
-        { status: 500 }
       );
     }
   },
@@ -665,8 +581,6 @@ export async function POST(req: NextRequest) {
         return handlers.partnerLogin(req);
       case 'logout':
         return handlers.logout();
-      case 'register':
-        return handlers.register(req);
       case 'create-user':
         return handlers.createUser(req);
       case 'delete-user':

@@ -3,6 +3,7 @@ import prisma from '../../../lib/prisma';
 import { getCurrentUserId, getActorUserId } from '../../../lib/auth';
 import { TRANSACTION_TYPES_CONFIG } from '../../../config/config';
 import { sendEmail, emailTemplates } from '../../../lib/emailConfig';
+import { escapeHtml, escapeHtmlMultiline } from '../../../lib/escapeHtml';
 import * as XLSX from 'xlsx';
 import { calculateTransactionBalance, getCurrentPartnerBalance, getCurrentTotalBalance } from '../../../lib/balanceCalculator';
 import { buildTransactionWhereClause } from '../../../lib/transactionWhereBuilder';
@@ -418,9 +419,18 @@ export async function POST(request: NextRequest) {
     }
 
     // For better display text, fetch the names of the partners involved.
-    const fromPartner = fromPartnerId ? await prisma.partner.findUnique({ where: { id: fromPartnerId }}) : null;
-    const toPartner = toPartnerId ? await prisma.partner.findUnique({ where: { id: toPartnerId }}) : null;
-    const actionPerformer = actionPerformerId ? await prisma.partner.findUnique({ where: { id: actionPerformerId }}) : activePartner;
+    // Partner ids come from the request: each must be one of this account's partners.
+    const ownPartner = (partnerId: number) =>
+      prisma.partner.findFirst({ where: { id: partnerId, createdById: currentUserId } });
+    if ([fromPartnerId, toPartnerId].some((pid) => pid !== null && !Number.isFinite(pid))) {
+      return NextResponse.json({ error: 'Partner not found.' }, { status: 404 });
+    }
+    const fromPartner = fromPartnerId ? await ownPartner(fromPartnerId) : null;
+    const toPartner = toPartnerId ? await ownPartner(toPartnerId) : null;
+    if ((fromPartnerId && !fromPartner) || (toPartnerId && !toPartner)) {
+      return NextResponse.json({ error: 'Partner not found.' }, { status: 404 });
+    }
+    const actionPerformer = actionPerformerId ? await ownPartner(actionPerformerId) : activePartner;
 
     console.log(`Transaction creation - Type: ${type}`);
     console.log(`From Partner ID: ${fromPartnerId} (${fromPartner?.name || 'N/A'})`);
@@ -527,9 +537,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(transaction, { status: 201 });
   } catch (error) {
-    console.error('Error creating transaction:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    return NextResponse.json({ error: 'Failed to create transaction', details: errorMessage }, { status: 500 });
+    console.error('Create transaction failed:', error);
+    return NextResponse.json({ error: 'Failed to create transaction' }, { status: 500 });
   }
 }
 
@@ -1080,7 +1089,7 @@ async function handleEmailExport(request: NextRequest) {
       const finalTotalAmount = partnerTotalAmount + netPartnerTransfers;
       return `
         <tr>
-          <td style="padding: 8px; border: 1px solid #ddd;">${name}</td>
+          <td style="padding: 8px; border: 1px solid #ddd;">${escapeHtml(name)}</td>
           <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">${formatCurrency(stats.loanRepayments || 0)}</td>
           <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">${formatCurrency(stats.chitContributions || 0)}</td>
           <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">${formatCurrency(stats.recordedAmounts || 0)}</td>
@@ -1099,14 +1108,14 @@ async function handleEmailExport(request: NextRequest) {
       
       <h3>Export Details:</h3>
       <ul>
-        <li><strong>Export Type:</strong> ${description}</li>
+        <li><strong>Export Type:</strong> ${escapeHtml(description)}</li>
         <li><strong>Total Transactions:</strong> ${totalTransactions}</li>
         <li><strong>Transaction Amount Total:</strong> ${formatCurrency(totalAmount)}</li>
-        ${startDate ? `<li><strong>Start Date:</strong> ${formatDate(startDate)}</li>` : ''}
-        ${endDate ? `<li><strong>End Date:</strong> ${formatDate(endDate)}</li>` : ''}
-        ${partner && partner !== 'ALL' && partnerNames[partner] ? `<li><strong>Partner:</strong> ${partnerNames[partner]}</li>` : ''}
-        ${advMember && memberNames[advMember] ? `<li><strong>Member:</strong> ${memberNames[advMember]}</li>` : ''}
-        ${type ? `<li><strong>Transaction Type:</strong> ${type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</li>` : ''}
+        ${startDate ? `<li><strong>Start Date:</strong> ${escapeHtml(formatDate(startDate))}</li>` : ''}
+        ${endDate ? `<li><strong>End Date:</strong> ${escapeHtml(formatDate(endDate))}</li>` : ''}
+        ${partner && partner !== 'ALL' && partnerNames[partner] ? `<li><strong>Partner:</strong> ${escapeHtml(partnerNames[partner])}</li>` : ''}
+        ${advMember && memberNames[advMember] ? `<li><strong>Member:</strong> ${escapeHtml(memberNames[advMember])}</li>` : ''}
+        ${type ? `<li><strong>Transaction Type:</strong> ${escapeHtml(type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()))}</li>` : ''}
       </ul>
 
       <h3>Transaction Summary by Type:</h3>
@@ -1154,7 +1163,7 @@ async function handleEmailExport(request: NextRequest) {
         </table>
       </div>
       
-      ${customMessage ? `<h3>Additional Notes:</h3><p>${customMessage}</p>` : ''}
+      ${customMessage ? `<h3>Additional Notes:</h3><p>${escapeHtmlMultiline(customMessage)}</p>` : ''}
       
       <p><strong>Generated on:</strong> ${formatDate(new Date())}</p>
       <p><em>The attached Excel file contains two worksheets:</em></p>

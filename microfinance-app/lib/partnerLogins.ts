@@ -127,7 +127,8 @@ export async function getLoginPartners() {
   return prisma.partner.findMany({
     where: { createdById: primaryAdmin.id, isActive: true },
     orderBy: { name: 'asc' },
-    select: { id: true, name: true, code: true },
+    // Public (no session): only what a sign-in picker needs.
+    select: { id: true, name: true },
   });
 }
 
