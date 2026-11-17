@@ -4,11 +4,12 @@
  * Tax report (Report template): profit & loss, cash flow and partner share for a fiscal period.
  * Year, period and scope live in the URL (`?fy=2025&period=H1&scope=loans`; defaults: current
  * year, full year, all). Every figure comes from GET /api/reports/itr (lib/itrReport.ts); this
- * page only lays them out. A line opens the records behind it.
+ * page only lays them out. A line opens the records behind it. Export downloads the same report as
+ * an Excel workbook for the accountant (GET /api/reports/itr/export, lib/itrReportExcel.ts).
  */
 import * as React from 'react';
 import Link from 'next/link';
-import { AlertTriangle, CalendarClock, ChevronRight, Info, ReceiptText } from 'lucide-react';
+import { AlertTriangle, CalendarClock, ChevronRight, Download, Info, ReceiptText } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { formatDate, formatMoney } from '@/lib/format';
@@ -16,15 +17,17 @@ import { useUrlState } from '@/lib/list/useUrlState';
 import { FISCAL_PERIOD_KEYS, fiscalYearLabel, type FiscalPeriodKey } from '@/lib/fiscalPeriods';
 import type { ItrScope, ItrSeries } from '@/lib/itrReport';
 import type { ItrLineSummary, ItrReportResponse, ItrReportView, ItrWarningSummary } from '@/lib/itrReportView';
-import { useItrReport, type ItrReportParams } from '@/lib/query/reports';
+import { downloadItrReport, useItrReport, type ItrReportParams } from '@/lib/query/reports';
+import { toast } from '@/lib/toast';
+import { Button } from '@/components/ui/button';
 import { DataTable, RefreshProgress, type DataTableColumn } from '@/components/kit/data-table';
 import { DateText } from '@/components/kit/date-text';
 import { EmptyState } from '@/components/kit/empty-state';
-import { ErrorState } from '@/components/kit/error-state';
+import { ErrorState, errorMessage } from '@/components/kit/error-state';
 import { Money } from '@/components/kit/money';
 import { NativeSelect } from '@/components/kit/native-select';
 import { PageContainer } from '@/components/kit/page-container';
-import { PageHeader } from '@/components/kit/page-header';
+import { iconOnPhone, PageHeader } from '@/components/kit/page-header';
 import { SegmentedControl } from '@/components/kit/period-picker';
 import { SectionCard } from '@/components/kit/section-card';
 import { StatCard } from '@/components/kit/stat-card';
@@ -394,6 +397,22 @@ function TaxReport() {
   const notStarted = report?.period.status === 'not-started';
   const empty = report ? notStarted || !hasAnything(report) : false;
 
+  const [exporting, setExporting] = React.useState(false);
+  // Exports the period on screen: off while it loads (or reloads for a new choice) and when it has no records.
+  const canExport = loaded && !refreshing && !empty && !exporting;
+  const exportExcel = async () => {
+    if (!canExport) return;
+    setExporting(true);
+    try {
+      const filename = await downloadItrReport(params);
+      toast.success('Tax report downloaded', { description: filename });
+    } catch (error) {
+      toast.error('Export failed', { description: errorMessage(error) ?? 'Failed to export the tax report' });
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div>
       <PageHeader
@@ -401,7 +420,6 @@ function TaxReport() {
         description={periodText}
         actionsLayout="stack"
         actions={
-          // Phase 4 adds the Excel export button here, after the controls.
           <>
             <NativeSelect
               aria-label="Financial year"
@@ -414,6 +432,10 @@ function TaxReport() {
             />
             <SegmentedControl aria-label="Period" size="sm" value={period} onChange={(next) => url.set({ period: next === 'FY' ? null : next })} options={PERIOD_OPTIONS} />
             <SegmentedControl aria-label="Scope" size="sm" value={scope} onChange={(next) => url.set({ scope: next === 'all' ? null : next })} options={SCOPE_OPTIONS} />
+            <Button className={iconOnPhone} variant="outline" size="sm" onClick={() => void exportExcel()} disabled={!canExport} aria-label="Export to Excel" aria-busy={exporting || undefined}>
+              <Download aria-hidden="true" />
+              <span className="max-sm:sr-only">{exporting ? 'Exporting…' : 'Export'}</span>
+            </Button>
           </>
         }
       />

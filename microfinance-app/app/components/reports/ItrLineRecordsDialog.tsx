@@ -10,7 +10,7 @@ import * as React from 'react';
 import Link from 'next/link';
 
 import type { ItrRecord } from '@/lib/itrReport';
-import type { ItrLineSection } from '@/lib/itrReportView';
+import { ITR_LEDGER_TYPE_LABELS, ITR_LOAN_TYPE_LABELS, type ItrLineSection } from '@/lib/itrReportView';
 import { useItrLineRecords, type ItrReportParams } from '@/lib/query/reports';
 import { recordAmountCategoryLabel } from '@/lib/transactionValidation';
 import { Button } from '@/components/ui/button';
@@ -32,19 +32,8 @@ export interface OpenLine {
 
 const PAGE = 100;
 
-const LOAN_TYPE: Record<string, string> = { monthly: 'Monthly loan', weekly: 'Weekly loan', reducingBalance: 'Reducing Balance loan' };
-const LEDGER_TYPE: Record<string, string> = {
-  CHIT_CONTRIBUTION: 'Chit contribution',
-  LOAN_REPAYMENT: 'Loan repayment',
-  loan_repaid: 'Loan repayment',
-  DOCUMENT_CHARGE: 'Document charge',
-  AUCTION_PAYOUT: 'Auction payout',
-  LOAN_DISBURSEMENT: 'Loan disbursement',
-  loan_given: 'Loan disbursement',
-  RECORD_AMOUNT: 'Record Amount',
-  PARTNER_TO_PARTNER: 'Partner transfer',
-  transfer: 'Partner transfer',
-};
+const LOAN_TYPE = ITR_LOAN_TYPE_LABELS;
+const LEDGER_TYPE = ITR_LEDGER_TYPE_LABELS;
 
 /** Money with paise only when the amount has them. */
 export const decimalsOf = (value: number | null | undefined) => (value != null && Math.round(value * 100) % 100 !== 0 ? 2 : 0);

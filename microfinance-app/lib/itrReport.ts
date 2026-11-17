@@ -139,7 +139,10 @@ export interface ItrRecord {
   type?: string;
   category?: RecordAmountCategory | null;
   note?: string | null;
+  /** The partner whose cash moved; for a partner transfer, the sender. */
   partnerId?: number | null;
+  /** Partner transfer only: the receiving partner. */
+  toPartnerId?: number | null;
 }
 
 export interface ItrSeries {
@@ -590,7 +593,7 @@ export function buildItrReport(input: ItrReportInput, options: ItrReportOptions)
 
     if (move.kind === 'transfer') {
       transfers.months[i] += move.amount;
-      transfers.records.push({ ...base, amount: fromPaise(move.amount), partnerId: move.from });
+      transfers.records.push({ ...base, amount: fromPaise(move.amount), partnerId: move.from, toPartnerId: move.to });
       partnerAcc(move.from).transfersOut += move.amount;
       partnerAcc(move.to).transfersIn += move.amount;
       continue;

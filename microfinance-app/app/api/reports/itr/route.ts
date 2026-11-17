@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCurrentUserId } from '../../../../lib/auth';
-import { buildItrReport, ITR_SCOPES, type ItrScope } from '../../../../lib/itrReport';
-import {
-  clampRangeToAsOf, filingYearLabel, fiscalPeriodRange, fiscalYearLabel, fiscalYearOf, listFiscalYears,
-  parseFiscalPeriod, parseFiscalYear, type FiscalPeriodKey,
-} from '../../../../lib/fiscalPeriods';
+import { buildItrReport } from '../../../../lib/itrReport';
+import { clampRangeToAsOf, filingYearLabel, fiscalPeriodRange, fiscalYearLabel, fiscalYearOf, listFiscalYears } from '../../../../lib/fiscalPeriods';
+import { parseItrReportQuery } from '../../../../lib/itrReportParams';
 import { countUnclassifiedEntries, loadEarliestRecordDate, loadItrReportInput } from '../../../../lib/itrReportData';
 import { findItrLine, parseItrLineSection, toItrReportView, type ItrLineResponse, type ItrReportResponse } from '../../../../lib/itrReportView';
 
@@ -34,17 +32,9 @@ export async function GET(request: NextRequest) {
     const params = new URL(request.url).searchParams;
     const asOf = new Date();
 
-    const fyParam = params.get('fy');
-    const fy = fyParam === null || fyParam === '' ? fiscalYearOf(asOf) : parseFiscalYear(fyParam);
-    if (fy === null) return bad('fy must be the start year of a fiscal year, e.g. 2025 for FY 2025-26.');
-
-    const periodParam = params.get('period');
-    const period: FiscalPeriodKey | null = periodParam === null || periodParam === '' ? 'FY' : parseFiscalPeriod(periodParam);
-    if (period === null) return bad('period must be one of FY, H1, H2, Q1, Q2, Q3, Q4.');
-
-    const scopeParam = (params.get('scope') ?? '').trim().toLowerCase();
-    const scope: ItrScope | null = scopeParam === '' ? 'all' : (ITR_SCOPES as readonly string[]).includes(scopeParam) ? (scopeParam as ItrScope) : null;
-    if (scope === null) return bad('scope must be one of all, chits, loans.');
+    const parsed = parseItrReportQuery(params, asOf);
+    if (parsed.error !== null) return bad(parsed.error);
+    const { fy, period, scope } = parsed.query;
 
     const sectionParam = params.get('section');
     const lineKey = params.get('line');

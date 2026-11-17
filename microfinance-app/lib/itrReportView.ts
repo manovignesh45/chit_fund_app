@@ -10,6 +10,21 @@
 import type { ItrLine, ItrRecord, ItrReport, ItrWarning } from './itrReport';
 
 export type ItrLineSection = 'pl' | 'cash' | 'warning';
+
+/** Display names for a record's loan type and ledger type (records dialog and Excel export). */
+export const ITR_LOAN_TYPE_LABELS: Readonly<Record<string, string>> = { monthly: 'Monthly loan', weekly: 'Weekly loan', reducingBalance: 'Reducing Balance loan' };
+export const ITR_LEDGER_TYPE_LABELS: Readonly<Record<string, string>> = {
+  CHIT_CONTRIBUTION: 'Chit contribution',
+  LOAN_REPAYMENT: 'Loan repayment',
+  loan_repaid: 'Loan repayment',
+  DOCUMENT_CHARGE: 'Document charge',
+  AUCTION_PAYOUT: 'Auction payout',
+  LOAN_DISBURSEMENT: 'Loan disbursement',
+  loan_given: 'Loan disbursement',
+  RECORD_AMOUNT: 'Record Amount',
+  PARTNER_TO_PARTNER: 'Partner transfer',
+  transfer: 'Partner transfer',
+};
 export const ITR_LINE_SECTIONS: readonly ItrLineSection[] = ['pl', 'cash', 'warning'];
 
 export interface ItrLineSummary extends Omit<ItrLine, 'records'> {

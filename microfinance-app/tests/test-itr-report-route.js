@@ -1,7 +1,9 @@
 // Run with: node tests/test-itr-report-route.js. No database connection or writes.
 // GET /api/reports/itr through the real loader (lib/itrReportData.ts) against an in-memory
 // Prisma stand-in: authentication, parameter validation and defaults, owner scoping, the
-// records-free first response and the one-line records read. Also the Tax report nav entry.
+// records-free first response and the one-line records read. Also the Tax report nav entry,
+// and GET /api/reports/itr/export (the Excel file): auth, parameters, headers, file name and
+// that the file holds the same report.
 process.env.TS_NODE_COMPILER_OPTIONS = JSON.stringify({ module: 'CommonJS', jsx: 'react-jsx' });
 require('ts-node/register/transpile-only');
 const assert = require('node:assert/strict');
@@ -130,9 +132,21 @@ const prisma = {
 let currentUser = 1;
 stubModule('../lib/prisma', { default: prisma, __esModule: true });
 stubModule('../lib/auth', { getCurrentUserId: async () => currentUser });
-stubModule('next/server', { NextResponse: { json: (body, init) => ({ body, status: init?.status ?? 200 }) } });
+// JSON answers as { body, status }; a file answer (new NextResponse) keeps its bytes and headers.
+class NextResponse {
+  constructor(body, init = {}) {
+    this.body = body;
+    this.status = init.status ?? 200;
+    this.headers = new Map(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
+  }
+  static json(body, init) {
+    return { body, status: init?.status ?? 200 };
+  }
+}
+stubModule('next/server', { NextResponse });
 
 const route = require('../app/api/reports/itr/route');
+const exportRoute = require('../app/api/reports/itr/export/route');
 const { buildItrReport } = require('../lib/itrReport');
 const { toItrReportView, findItrLine } = require('../lib/itrReportView');
 const fp = require('../lib/fiscalPeriods');
@@ -309,4 +323,118 @@ test('nav: Tax report sits in Money, has its route and crumb, and is not on the 
   assert.deepEqual(nav.getBreadcrumbs('/reports/itr').map((c) => [c.label, c.href]), [['Tax report', '/reports/itr']]);
   assert.equal(nav.getRouteLayout('/reports/itr'), 'page');
   assert.equal(new Set(nav.NAV_ITEMS.map((i) => i.id)).size, nav.NAV_ITEMS.length, 'nav ids are unique');
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/reports/itr/export
+// ---------------------------------------------------------------------------
+
+const ExcelJS = require('exceljs');
+const { itrExportSheetNames } = require('../lib/itrReportExcel');
+
+const getExport = async (query = '') => {
+  calls.length = 0;
+  return exportRoute.GET({ url: `http://x/api/reports/itr/export${query ? `?${query}` : ''}` });
+};
+const readWorkbook = async (res) => {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(Buffer.from(res.body));
+  return wb;
+};
+const summaryValue = (wb, label) => {
+  let value;
+  wb.getWorksheet('Summary').eachRow((row) => {
+    if (String(row.getCell(1).value ?? '').trim() === label) value = row.getCell(2).value;
+  });
+  return value;
+};
+
+test('export: 401 without a session, nothing read', async () => {
+  currentUser = null;
+  try {
+    const res = await getExport('fy=2025');
+    assert.equal(res.status, 401);
+    assert.equal(calls.length, 0);
+  } finally {
+    currentUser = 1;
+  }
+});
+
+test('export: 400 on the same bad parameters as the report, nothing read', async () => {
+  for (const query of ['fy=abc', 'fy=25', 'fy=1999', 'fy=2025.5', 'period=Q5', 'period=year', 'scope=everything']) {
+    const [report, file] = [await route.GET({ url: `http://x/api/reports/itr?${query}` }), await getExport(query)];
+    assert.equal(file.status, 400, query);
+    assert.equal(file.body.error, report.body.error, `${query}: same message as the report route`);
+    assert.equal(calls.length, 0, `${query}: nothing is read`);
+  }
+});
+
+test('export: an .xlsx with a descriptive file name, per period and scope', async () => {
+  for (const [query, name] of [
+    ['fy=2025&period=Q1&scope=all', 'tax-report-FY2025-26-Q1-all.xlsx'],
+    ['fy=2025', 'tax-report-FY2025-26-all.xlsx'],
+    ['fy=2025&period=h2&scope=LOANS', 'tax-report-FY2025-26-H2-loans.xlsx'],
+    ['fy=2024&scope=chits', 'tax-report-FY2024-25-chits.xlsx'],
+  ]) {
+    const res = await getExport(query);
+    assert.equal(res.status, 200, query);
+    assert.equal(res.headers.get('content-type'), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    assert.equal(res.headers.get('content-disposition'), `attachment; filename="${name}"`, query);
+    assert.equal(res.headers.get('cache-control'), 'no-store');
+    const bytes = Buffer.from(res.body);
+    assert.equal(bytes.subarray(0, 2).toString(), 'PK', `${query}: a zip (xlsx) file`);
+    const wb = await readWorkbook(res);
+    const scope = /scope=(\w+)/i.exec(query)?.[1].toLowerCase() ?? 'all';
+    assert.deepEqual(wb.worksheets.map((ws) => ws.name), itrExportSheetNames(scope), query);
+  }
+  // Defaults: the current fiscal year (running, so the name carries today's IST date), FY, all.
+  const res = await getExport();
+  const fy = fp.fiscalYearOf(new Date());
+  assert.equal(res.headers.get('content-disposition'), `attachment; filename="tax-report-${fp.fiscalYearLabel(fy).replace(' ', '')}-all-to-${fp.istDayKey(new Date())}.xlsx"`);
+});
+
+test('export: the file holds buildItrReport of the owner\'s rows (the same figures as the page), owner-scoped', async () => {
+  for (const [fy, period, scope] of [[2025, 'FY', 'all'], [2025, 'Q2', 'all'], [2025, 'FY', 'loans'], [2025, 'FY', 'chits']]) {
+    const res = await getExport(`fy=${fy}&period=${period}&scope=${scope}`);
+    for (const call of calls) assert.equal(ownerOf(call.where), 1, `${call.model} is scoped to the owner`);
+    const expected = buildItrReport(ownerInput(1), { fy, period, scope, asOf: new Date() });
+    const page = (await get(`fy=${fy}&period=${period}&scope=${scope}`)).body.report;
+    const wb = await readWorkbook(res);
+    const netLabel = scope === 'all' ? 'Net profit' : `Net profit (${scope === 'chits' ? 'Chits' : 'Loans'}, before shared items)`;
+    assert.equal(summaryValue(wb, netLabel), expected.profitAndLoss.netProfit.total, `${fy} ${period} ${scope}: net profit`);
+    assert.equal(summaryValue(wb, netLabel), page.profitAndLoss.netProfit.total, 'equals the page');
+    assert.equal(summaryValue(wb, 'Net cash movement'), page.cashFlow.netMovement.total);
+    if (scope === 'all') {
+      assert.equal(summaryValue(wb, 'Closing cash'), page.cashFlow.closing, 'closing cash equals the page');
+      assert.equal(summaryValue(wb, 'Ravi'), page.partnerShare.partners.find((p) => p.name === 'Ravi').share);
+      assert.equal(summaryValue(wb, 'Entries to classify (any date)'), 2, 'the unclassified count of every date');
+    }
+  }
+  // Another account's export holds only its own figures.
+  currentUser = 2;
+  try {
+    const res = await getExport('fy=2025');
+    for (const call of calls) assert.equal(ownerOf(call.where), 2);
+    const wb = await readWorkbook(res);
+    let otherIncome; // P&L lines are indented under their heading
+    wb.getWorksheet('Summary').eachRow((row) => { if (row.getCell(1).value === '   Other income') otherIncome = row.getCell(2).value; });
+    assert.equal(otherIncome, 999999);
+  } finally {
+    currentUser = 1;
+  }
+});
+
+test('export: a failure answers 500 with a generic message', async () => {
+  const original = prisma.partner.findMany;
+  prisma.partner.findMany = async () => { throw new Error('db down: secret detail'); };
+  const error = console.error;
+  console.error = () => {};
+  try {
+    const res = await getExport('fy=2025');
+    assert.equal(res.status, 500);
+    assert.equal(res.body.error, 'Failed to export the tax report');
+  } finally {
+    prisma.partner.findMany = original;
+    console.error = error;
+  }
 });
