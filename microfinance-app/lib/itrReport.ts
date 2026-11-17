@@ -561,6 +561,18 @@ export function buildItrReport(input: ItrReportInput, options: ItrReportOptions)
   };
   for (const p of input.partners) partnerAcc(p.id).name = p.name;
 
+  // A transfer's debit row is written right before its credit row (same type, date and amount),
+  // so the memo record of the debit row can name the receiving partner.
+  const transferReceiver = new Map<number, number>();
+  const byId = new Map(input.transactions.map((t) => [t.id, t]));
+  for (const row of input.transactions) {
+    const next = TRANSFER_TYPES.has(row.type) && row.from_partner_id != null && row.to_partner_id == null ? byId.get(row.id + 1) : undefined;
+    if (next && next.type === row.type && next.from_partner_id == null && next.to_partner_id != null
+      && toPaise(next.amount) === toPaise(row.amount) && time(next.date) === time(row.date)) {
+      transferReceiver.set(row.id, next.to_partner_id);
+    }
+  }
+
   let opening = 0;
   const unclassified: ItrRecord[] = [];
   const documentChargeRows: ItrRecord[] = [];
@@ -592,8 +604,14 @@ export function buildItrReport(input: ItrReportInput, options: ItrReportOptions)
     };
 
     if (move.kind === 'transfer') {
-      transfers.months[i] += move.amount;
-      transfers.records.push({ ...base, amount: fromPaise(move.amount), partnerId: move.from, toPartnerId: move.to });
+      // POST /api/transactions stores a transfer as a debit row (from only) and a credit row
+      // (to only); older rows carry both partners. The memo counts each transfer once, on its
+      // sending row. Partner balances take both rows; the halves' Unassigned sides net out below.
+      if (move.from !== null) {
+        transfers.months[i] += move.amount;
+        const toPartnerId = move.to ?? transferReceiver.get(row.id) ?? null;
+        transfers.records.push({ ...base, amount: fromPaise(move.amount), partnerId: move.from, toPartnerId });
+      }
       partnerAcc(move.from).transfersOut += move.amount;
       partnerAcc(move.to).transfersIn += move.amount;
       continue;
@@ -647,6 +665,15 @@ export function buildItrReport(input: ItrReportInput, options: ItrReportOptions)
   const closing = opening + sumPaise(netMonths);
   let running = opening;
   const closingByMonth = netMonths.map((p) => fromPaise((running += p)));
+
+  // The two rows of a transfer each leave one side to Unassigned; only the unmatched remainder
+  // (a transfer row whose other half is missing) is Unassigned's.
+  const unassigned = partnerAccs.get(null);
+  if (unassigned) {
+    const net = unassigned.transfersIn - unassigned.transfersOut;
+    unassigned.transfersIn = Math.max(net, 0);
+    unassigned.transfersOut = Math.max(-net, 0);
+  }
 
   const partners: ItrPartnerCash[] = withShared
     ? [...partnerAccs.values()]

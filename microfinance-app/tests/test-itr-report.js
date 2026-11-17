@@ -350,6 +350,25 @@ test('partner transfers cancel in the total but move partner balances', () => {
   assert.deepEqual(oneSided.cashFlow.partners.map((p) => [p.name, p.closing]), [['Ravi', 500], ['Kumar', 0], ['Unassigned', -500]]);
 });
 
+test('a partner transfer stored as two rows (debit: from only, credit: to only) counts once', () => {
+  // POST /api/transactions writes PARTNER_TO_PARTNER as a debit row and a credit row.
+  const rows = [
+    credit(1, D('2025-04-10'), 5000, 'CAPITAL_IN', 'capital', 1),
+    tx(2, 'PARTNER_TO_PARTNER', D('2025-06-01'), 1000, { from_partner_id: 1, note: 'Transfer to Kumar - cash' }),
+    tx(3, 'PARTNER_TO_PARTNER', D('2025-06-01'), 1000, { to_partner_id: 2, note: 'Transfer from Ravi - cash' }),
+    tx(4, 'PARTNER_TO_PARTNER', D('2025-03-01'), 300, { from_partner_id: 2 }),
+    tx(5, 'PARTNER_TO_PARTNER', D('2025-03-01'), 300, { to_partner_id: 1 }),
+  ];
+  const r = build(2025, 'FY', 'all', AS_OF, { ...input, transactions: rows });
+  assert.equal(r.cashFlow.transfers.total, 1000);
+  assert.equal(paise(r.cashFlow.transfers.months.reduce((s, m) => s + m, 0)), paise(1000));
+  // One memo record per transfer, naming both partners (the credit row is its pair).
+  assert.deepEqual(r.cashFlow.transfers.records.map((x) => [x.id, x.amount, x.partnerId, x.toPartnerId]), [[2, 1000, 1, 2]]);
+  assert.deepEqual(r.cashFlow.partners.map((p) => [p.name, p.opening, p.transfersIn, p.transfersOut, p.closing]), [
+    ['Ravi', 300, 0, 1000, 4300], ['Kumar', -300, 1000, 0, 700],
+  ]);
+});
+
 test('ledger effects agree with LEDGER_TYPE_EFFECT and calculateTransactionBalance', () => {
   const types = Object.keys(LEDGER_TYPE_EFFECT);
   const rows = [
