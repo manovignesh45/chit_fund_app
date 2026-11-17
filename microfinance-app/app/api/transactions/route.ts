@@ -9,7 +9,7 @@ import { calculateTransactionBalance, getCurrentPartnerBalance, getCurrentTotalB
 import { buildTransactionWhereClause } from '../../../lib/transactionWhereBuilder';
 import { generateTransactionExportName } from '../../../lib/transactionExportNameGenerator';
 import { notifyOtherAdmins, getActorName } from '../../../lib/notifications';
-import { validateManualTransaction, isManualTransactionType, firstError } from '../../../lib/transactionValidation';
+import { validateManualTransaction, isManualTransactionType, firstError, recordAmountCategoryLabel } from '../../../lib/transactionValidation';
 import { parseListParams } from '../../../lib/list/server';
 import { buildMeta, MAX_PAGE_SIZE } from '../../../lib/list/types';
 
@@ -160,7 +160,7 @@ async function handleManualTransaction(
       { status: 400 }
     );
   }
-  const { type, amount, date, note, fromPartnerId, toPartnerId } = validation.value;
+  const { type, amount, date, note, fromPartnerId, toPartnerId, category } = validation.value;
 
   // Partners must belong to the current data owner — never trust client-supplied IDs.
   const partnerIds = [fromPartnerId, toPartnerId].filter((id): id is number => id !== null);
@@ -217,6 +217,7 @@ async function handleManualTransaction(
           amount,
           date,
           note,
+          category,
           createdById: currentUserId,
           from_partner_id: fromPartnerId,
           to_partner_id: toPartnerId,
@@ -315,6 +316,7 @@ async function handleManualTransaction(
       direction: isTransfer ? 'transfer' : toPartnerId ? 'credit' : 'debit',
       amount,
       reason: note,
+      ...(isTransfer ? {} : { category }),
       date: date.toISOString(),
       fromPartner: fromPartner?.name ?? null,
       toPartner: toPartner?.name ?? null,
@@ -934,6 +936,7 @@ async function handleEmailExport(request: NextRequest) {
         'Total Balance': transaction.totalBalance !== null && transaction.totalBalance !== undefined
           ? stripRupee(transaction.totalBalance)
           : '-',
+        'Category': transaction.type === 'RECORD_AMOUNT' ? recordAmountCategoryLabel(transaction.category) : '-',
         'Note': transaction.note || '-',
       };
     });
@@ -988,6 +991,7 @@ async function handleEmailExport(request: NextRequest) {
       { width: 15 }, // Amount
       { width: 18 }, // Partner Balance
       { width: 18 }, // Total Balance
+      { width: 20 }, // Category
       { width: 30 }  // Note
     ];
 

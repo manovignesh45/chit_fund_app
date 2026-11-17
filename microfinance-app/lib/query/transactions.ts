@@ -7,7 +7,8 @@
  *   await invalidateTransactions();
  *
  * Keys: ['transactions', action, null, params]. URLs: list → `/transactions?…`, other
- * actions → `/transactions/<action>?…` (summary, aggregations, pending-loans, pending-chits).
+ * actions → `/transactions/<action>?…` (summary, aggregations, pending-loans, pending-chits,
+ * classify).
  */
 import useSWR from 'swr';
 import { invalidateDashboardCache } from '../dashboardCache';
@@ -16,6 +17,7 @@ import { invalidate, MONEY_TAGS } from './invalidate';
 import { queryKeys, registerEndpoint, type QueryKey, type QueryParams } from './keys';
 import type { Aggregations, AggregationMonth } from './dashboard';
 import { PARTNERS } from './dashboard';
+import type { RecordAmountCategory, RecordAmountDirection } from '../recordAmountCategories';
 
 export const TRANSACTIONS = 'transactions';
 
@@ -39,6 +41,8 @@ export interface TransactionRecord {
   date: string;
   createdAt: string;
   note?: string | null;
+  /** RECORD_AMOUNT only; null = unclassified (lib/recordAmountCategories.ts). */
+  category?: string | null;
   partnerBalance?: number | null;
   totalBalance?: number | null;
 }
@@ -117,6 +121,32 @@ export interface ManualTransactionBody {
   note: string;
   from_partner_id: string | number | null;
   to_partner_id: string | number | null;
+  /** RECORD_AMOUNT only (required there); not sent for a partner transfer. */
+  category?: string;
+}
+
+/** A RECORD_AMOUNT entry with no usable category (GET /api/transactions/classify). */
+export interface UnclassifiedEntry {
+  id: number;
+  date: string;
+  amount: number;
+  direction: RecordAmountDirection;
+  partnerName: string | null;
+  note: string | null;
+  /** Stored value: null, or one that does not fit the direction. */
+  category: string | null;
+  /** Best guess from the note; the user confirms it. */
+  suggestedCategory: RecordAmountCategory | null;
+}
+
+export interface UnclassifiedEntriesResponse {
+  entries: UnclassifiedEntry[];
+  count: number;
+}
+
+export interface CategoryUpdate {
+  id: number;
+  category: RecordAmountCategory;
 }
 
 // ─────────────────────────────────────────────────────────────── keys
@@ -131,6 +161,7 @@ export const transactionKeys = {
     queryKeys.action(TRANSACTIONS, 'pending-loans', null, { startDate, endDate }),
   pendingChits: (startDate: string, endDate: string): QueryKey =>
     queryKeys.action(TRANSACTIONS, 'pending-chits', null, { startDate, endDate }),
+  unclassified: (): QueryKey => queryKeys.action(TRANSACTIONS, 'classify', null),
 };
 
 // ─────────────────────────────────────────────────────────────── reads
@@ -151,6 +182,11 @@ export function usePendingLoans(range: { startDate: string; endDate: string } | 
   return useSWR<{ pendingLoans: PendingLoan[] }>(range ? transactionKeys.pendingLoans(range.startDate, range.endDate) : null);
 }
 
+/** Record Amount entries that still need a category, with suggestions. */
+export function useUnclassifiedEntries(enabled = true) {
+  return useSWR<UnclassifiedEntriesResponse>(enabled ? transactionKeys.unclassified() : null);
+}
+
 export function usePendingChits(range: { startDate: string; endDate: string } | null) {
   return useSWR<{ pendingChitFunds: PendingChitFund[] }>(range ? transactionKeys.pendingChits(range.startDate, range.endDate) : null);
 }
@@ -161,12 +197,29 @@ export const transactionWrites = {
   /** Manual entry; `partner` goes in x-active-partner (the selected partner's name, or ''). */
   create: (body: ManualTransactionBody, partner: string) =>
     apiFetch<unknown>('/transactions', { method: 'POST', body, headers: { 'x-active-partner': partner } }),
+  /** Set the category of Record Amount entries (all or none); balances are not touched. */
+  setCategories: (items: CategoryUpdate[]) =>
+    apiFetch<{ updated: CategoryUpdate[] }>('/transactions/classify', { method: 'PATCH', body: { items } }),
   /** Recompute every stored running balance (POST /api/recalculate-balances, no body, as before). */
   recalculateBalances: () =>
     apiFetch<{ transactionsProcessed?: number; finalTotalBalance?: number }>('/recalculate-balances', { method: 'POST' }),
 };
 
 // ─────────────────────────────────────────────────────────────── invalidation
+
+/**
+ * Resource of the tax report queries (lib/query/reports.ts, next phase). A category change
+ * moves amounts between report lines, so those queries refetch too.
+ */
+export const REPORTS = 'reports';
+
+/**
+ * After a category change: the transactions family (list badges, entries to classify) and
+ * the reports. Balances do not change, so the dashboard and partner balances are left alone.
+ */
+export function invalidateTransactionCategories(): Promise<void> {
+  return invalidate(TRANSACTIONS, REPORTS);
+}
 
 /** After a manual transaction, a partner transfer or a balance recalculation. */
 export function invalidateTransactions(): Promise<void> {

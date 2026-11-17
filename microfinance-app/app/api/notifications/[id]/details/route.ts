@@ -51,6 +51,7 @@ export async function GET(
           amount: true,
           date: true,
           note: true,
+          category: true,
           from_partner: true,
           to_partner: true,
           entered_by: true,

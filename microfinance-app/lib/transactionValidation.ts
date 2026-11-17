@@ -5,6 +5,13 @@
  * Shared by the API route and the TransactionForm so the client shows the
  * same errors the server enforces. The server is the source of truth.
  */
+import {
+  RECORD_AMOUNT_CATEGORIES,
+  categoryAllowsDirection,
+  isRecordAmountCategory,
+  type RecordAmountCategory,
+  type RecordAmountDirection,
+} from './recordAmountCategories';
 
 export const MANUAL_TRANSACTION_TYPES = {
   PARTNER_TO_PARTNER: 'PARTNER_TO_PARTNER',
@@ -17,7 +24,10 @@ export const MAX_TRANSACTION_AMOUNT = 100_000_000; // ₹10 crore sanity cap
 /** Allow small clock/timezone skew; anything further ahead is a typo. */
 const MAX_FUTURE_DAYS = 1;
 
-/** Suggested reasons shown as quick-pick chips in the form. */
+/**
+ * Suggested reasons shown as quick-pick chips in the form. Record Amount has none: its
+ * category picker (lib/recordAmountCategories.ts) says what kind of entry it is.
+ */
 export const NOTE_SUGGESTIONS: Record<string, string[]> = {
   PARTNER_TO_PARTNER: [
     'Cash handover',
@@ -25,13 +35,6 @@ export const NOTE_SUGGESTIONS: Record<string, string[]> = {
     'Collection settlement',
     'Funds for loan disbursement',
     'Funds for auction payout',
-  ],
-  RECORD_AMOUNT: [
-    'Opening balance',
-    'Capital investment',
-    'Capital withdrawal',
-    'Office / operating expense',
-    'Balance correction',
   ],
 };
 
@@ -42,6 +45,8 @@ export interface ManualTransactionInput {
   note?: unknown;
   from_partner_id?: unknown;
   to_partner_id?: unknown;
+  /** RECORD_AMOUNT only (required); ignored for PARTNER_TO_PARTNER. */
+  category?: unknown;
 }
 
 export interface ValidatedManualTransaction {
@@ -51,9 +56,11 @@ export interface ValidatedManualTransaction {
   note: string;
   fromPartnerId: number | null;
   toPartnerId: number | null;
+  /** Always null for PARTNER_TO_PARTNER. */
+  category: RecordAmountCategory | null;
 }
 
-export type FieldErrors = Partial<Record<'type' | 'amount' | 'date' | 'note' | 'from_partner_id' | 'to_partner_id', string>>;
+export type FieldErrors = Partial<Record<'type' | 'amount' | 'date' | 'note' | 'from_partner_id' | 'to_partner_id' | 'category', string>>;
 
 export type ValidationResult =
   | { ok: true; value: ValidatedManualTransaction }
@@ -106,6 +113,39 @@ export function validateDate(date: unknown, now: Date = new Date()): string | un
   return undefined;
 }
 
+/**
+ * A Record Amount entry is a credit when it has a to-partner, else a debit when it has a
+ * from-partner (the rule lib/itrReport.ts and the balance replay use); null when neither.
+ */
+export function recordAmountDirection(fromPartnerId: unknown, toPartnerId: unknown): RecordAmountDirection | null {
+  if (toPartnerId !== null && toPartnerId !== undefined && toPartnerId !== '') return 'credit';
+  if (fromPartnerId !== null && fromPartnerId !== undefined && fromPartnerId !== '') return 'debit';
+  return null;
+}
+
+/** The categories a Record Amount entry in this direction may use, in display order. */
+export function recordAmountCategoriesFor(direction: RecordAmountDirection) {
+  return RECORD_AMOUNT_CATEGORIES.filter((c) => c.directions.includes(direction));
+}
+
+/** Display label for a stored category; "Unclassified" for null or an unknown value. */
+export function recordAmountCategoryLabel(category: unknown): string {
+  return RECORD_AMOUNT_CATEGORIES.find((c) => c.value === category)?.label ?? 'Unclassified';
+}
+
+/**
+ * A Record Amount category: required, one of RECORD_AMOUNT_CATEGORIES, and allowed for the
+ * entry's direction (skipped when the direction is not known yet).
+ */
+export function validateRecordAmountCategory(category: unknown, direction: RecordAmountDirection | null): string | undefined {
+  if (category === null || category === undefined || category === '') return 'Choose a category so this entry is reported on the right line.';
+  if (!isRecordAmountCategory(category)) return 'Choose a category from the list.';
+  if (direction && !categoryAllowsDirection(category, direction)) {
+    return `${recordAmountCategoryLabel(category)} cannot be a ${direction}. Choose a ${direction} category.`;
+  }
+  return undefined;
+}
+
 function parseId(id: unknown): number | null {
   if (id === null || id === undefined || id === '') return null;
   const n = typeof id === 'number' ? id : Number(id);
@@ -143,6 +183,14 @@ export function validateManualTransaction(input: ManualTransactionInput, now: Da
     errors.to_partner_id = 'Record Amount must credit or debit exactly one partner.';
   }
 
+  const isRecordAmount = input.type === MANUAL_TRANSACTION_TYPES.RECORD_AMOUNT;
+  if (isRecordAmount) {
+    // Only check the direction once exactly one partner is set (otherwise that error shows).
+    const direction = !fromPartnerId === !toPartnerId ? null : recordAmountDirection(fromPartnerId, toPartnerId);
+    const categoryError = validateRecordAmountCategory(input.category, direction);
+    if (categoryError) errors.category = categoryError;
+  }
+
   if (Object.keys(errors).length > 0) return { ok: false, errors };
 
   return {
@@ -154,6 +202,7 @@ export function validateManualTransaction(input: ManualTransactionInput, now: Da
       note: normalizeNote(input.note),
       fromPartnerId,
       toPartnerId,
+      category: isRecordAmount ? (input.category as RecordAmountCategory) : null,
     },
   };
 }

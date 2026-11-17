@@ -22,6 +22,7 @@ import { usePartnerBalances } from '@/lib/query/dashboard';
 import { invalidateTransactions, TRANSACTIONS, transactionWrites, type TransactionRecord } from '@/lib/query/transactions';
 import { buildTransactionFilterParams, type TransactionFilters } from '../../lib/transactionFilterUtils';
 import { TRANSACTION_TYPES_CONFIG } from '../../config/config';
+import { recordAmountCategoryLabel } from '../../lib/transactionValidation';
 import { usePartner } from '../contexts/PartnerContext';
 
 import { Button } from '@/components/ui/button';
@@ -77,6 +78,23 @@ const isManualEntry = (t: TransactionRecord) => t.type === 'PARTNER_TO_PARTNER' 
 /** Strip the system "Transfer to/from X - " prefix to show only the reason. */
 const manualReason = (note?: string | null) =>
   note ? note.replace(/^Transfer (?:to|from) .+? - /, '').replace(/^Transfer (?:to|from) [^-]+$/, '').trim() : '';
+
+/** Category of a Record Amount entry; amber "Unclassified" when it has none. */
+function CategoryBadge({ t, className }: { t: TransactionRecord; className?: string }) {
+  if (t.type !== 'RECORD_AMOUNT') return null;
+  const unclassified = recordAmountCategoryLabel(t.category) === 'Unclassified';
+  return (
+    <span
+      className={cn(
+        'inline-flex shrink-0 items-center whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-medium',
+        unclassified ? 'border-warning-border bg-warning-subtle text-warning-text' : 'border-transparent bg-muted text-muted-foreground',
+        className
+      )}
+    >
+      {recordAmountCategoryLabel(t.category)}
+    </span>
+  );
+}
 
 function extractMemberName(note?: string | null): string {
   if (!note) return '-';
@@ -250,8 +268,11 @@ function Transactions() {
         <div className="min-w-0">
           <div className="whitespace-nowrap font-medium text-foreground">{typeLabel(t.type)}</div>
           {isManualEntry(t) ? (
-            <div className="max-w-[16rem] truncate text-xs text-muted-foreground" title={t.note || ''}>
-              {manualReason(t.note) || <span className="italic text-warning-text">No reason recorded</span>}
+            <div className="flex max-w-[16rem] items-center gap-1.5 text-xs text-muted-foreground">
+              <CategoryBadge t={t} />
+              <span className="min-w-0 truncate" title={t.note || ''}>
+                {manualReason(t.note) || <span className="italic text-warning-text">No reason recorded</span>}
+              </span>
             </div>
           ) : null}
         </div>
@@ -423,7 +444,10 @@ function Transactions() {
           <div className="space-y-2">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <p className="font-medium text-foreground">{typeLabel(t.type)}</p>
+                <p className="flex flex-wrap items-center gap-1.5 font-medium text-foreground">
+                  {typeLabel(t.type)}
+                  <CategoryBadge t={t} />
+                </p>
                 <p className="truncate text-xs text-muted-foreground">
                   {isManualEntry(t) ? manualReason(t.note) || 'No reason recorded' : extractMemberName(t.note)} · {getPartnerName(t, partner)}
                 </p>
@@ -473,6 +497,7 @@ function Transactions() {
               { label: 'Entered by', value: detail.entered_by || '-' },
               { label: 'Partner balance', value: detail.partnerBalance == null ? '-' : <Money value={detail.partnerBalance} tone="plain" /> },
               { label: 'Total balance', value: detail.totalBalance == null ? '-' : <Money value={detail.totalBalance} tone="plain" /> },
+              ...(detail.type === 'RECORD_AMOUNT' ? [{ label: 'Category', value: <CategoryBadge t={detail} /> }] : []),
               { label: 'Note', value: <span className="whitespace-pre-line break-words">{detail.note || '—'}</span>, full: true },
             ]}
           />

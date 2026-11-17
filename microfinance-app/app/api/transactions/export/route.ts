@@ -4,6 +4,7 @@ import { getCurrentUserId } from '../../../../lib/auth';
 import * as XLSX from 'xlsx';
 import { buildTransactionWhereClause } from '../../../../lib/transactionWhereBuilder';
 import { generateTransactionExportName } from '../../../../lib/transactionExportNameGenerator';
+import { recordAmountCategoryLabel } from '../../../../lib/transactionValidation';
 
 export async function GET(request: NextRequest) {
   try {
@@ -213,6 +214,7 @@ export async function GET(request: NextRequest) {
         'Total Balance': transaction.totalBalance !== null && transaction.totalBalance !== undefined
           ? stripRupee(transaction.totalBalance)
           : '-',
+        'Category': transaction.type === 'RECORD_AMOUNT' ? recordAmountCategoryLabel(transaction.category) : '',
         'Note': transaction.note || ''
       };
     });
@@ -234,6 +236,7 @@ export async function GET(request: NextRequest) {
       { width: 15 }, // Amount
       { width: 18 }, // Partner Balance
       { width: 18 }, // Total Balance
+      { width: 20 }, // Category
       { width: 30 }  // Note
     ];
 
