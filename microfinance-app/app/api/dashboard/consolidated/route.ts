@@ -6,7 +6,8 @@ import {
   calculatePeriodFinancialMetrics,
   calculatePeriodLoanProfit,
   calculateTotalFinancialMetrics,
-  createPeriodRange
+  createPeriodRange,
+  loanCashGiven
 } from '../../../../lib/centralizedFinancialCalculations';
 import { autoUpdateCurrentMonths } from '../../../../lib/timeUtils';
 import { sendEmail, emailTemplates } from '../../../../lib/emailConfig';
@@ -19,6 +20,8 @@ import { GET as getTransactionSummary } from '../../transactions/summary/route';
 import { GET as getMonthlyChitProfit } from '../../chit-funds/monthly-profit/route';
 import { getActivitiesList, parseActivitiesQuery, wantsActivitiesList } from '../../../../lib/activitiesList';
 import { MAX_PAGE_SIZE } from '../../../../lib/list/types';
+import { computeAmountFlowTally } from '../../../../lib/amountFlowTally';
+import { getBalanceSummary } from '../../../../lib/balanceCalculator';
 
 // Use ISR with a 5-minute revalidation period
 export const revalidate = 300; // 5 minutes
@@ -51,6 +54,8 @@ export async function GET(request: NextRequest) {
     switch (action) {
       case 'summary':
         return await getSummary(request, currentUserId);
+      case 'amount-flow-tally':
+        return await getAmountFlowTally(currentUserId);
       case 'financial-data':
         return await getFinancialData(request, currentUserId);
       case 'export':
@@ -211,6 +216,95 @@ async function getCalendarMonth(request: NextRequest, currentUserId: number) {
     chitCommission: monthProfit ? { commission: monthProfit.commission, auctionCount: monthProfit.auctionCount } : null,
     auctionPayoutTotal: auctionPayouts.reduce((sum, t) => sum + Math.abs(t.amount ?? 0), 0),
   });
+}
+
+/**
+ * Amount flow tally (lib/amountFlowTally.ts): the business records next to the cash ledger,
+ * per category. Records use the same queries as the summary's Invested / Cash inflow / Cash
+ * outflow cards; the ledger balance is the Partner-wise balance panel's Total balance
+ * (getBalanceSummary), so the card matches both.
+ */
+async function getAmountFlowTally(currentUserId: number) {
+  try {
+    const [
+      investedCredits,
+      investedDebits,
+      contributionsSum,
+      repaymentsSum,
+      auctionsSum,
+      loans,
+      ledgerGroups,
+      documentCharges,
+      balanceSummary,
+      latestTransaction,
+    ] = await Promise.all([
+      prisma.transaction.aggregate({ _sum: { amount: true }, where: { createdById: currentUserId, type: 'RECORD_AMOUNT', to_partner: { not: null } } }),
+      prisma.transaction.aggregate({ _sum: { amount: true }, where: { createdById: currentUserId, type: 'RECORD_AMOUNT', from_partner: { not: null } } }),
+      prisma.contribution.aggregate({ _sum: { amount: true }, where: { chitFund: { createdById: currentUserId } } }),
+      prisma.repayment.aggregate({ _sum: { amount: true }, where: { loan: { createdById: currentUserId } } }),
+      prisma.auction.aggregate({ _sum: { amount: true }, where: { chitFund: { createdById: currentUserId } } }),
+      prisma.loan.findMany({
+        where: { createdById: currentUserId },
+        select: {
+          id: true,
+          amount: true,
+          documentCharge: true,
+          borrower: { select: { name: true } },
+          transaction: { select: { amount: true, date: true } },
+        },
+        orderBy: { id: 'asc' },
+      }),
+      prisma.transaction.groupBy({
+        by: ['type'],
+        where: { createdById: currentUserId, type: { not: 'RECORD_AMOUNT' } },
+        _sum: { amount: true },
+      }),
+      prisma.transaction.findMany({
+        where: { createdById: currentUserId, type: 'DOCUMENT_CHARGE' },
+        select: { id: true, amount: true, date: true, note: true },
+        orderBy: [{ date: 'asc' }, { id: 'asc' }],
+      }),
+      getBalanceSummary(currentUserId),
+      // The running total stored on the latest entry (same order as getCurrentTotalBalance).
+      prisma.transaction.findFirst({
+        where: { createdById: currentUserId },
+        orderBy: [{ createdAt: 'desc' }],
+        select: { totalBalance: true },
+      }),
+    ]);
+
+    const ledgerByType: Record<string, number> = {};
+    for (const group of ledgerGroups) ledgerByType[group.type] = group._sum.amount || 0;
+
+    const tallyLoans = loans.map((loan) => ({
+      id: loan.id,
+      borrower: loan.borrower?.name ?? `Loan #${loan.id}`,
+      amount: loan.amount,
+      documentCharge: loan.documentCharge || 0,
+      disbursementTransactionDate: loan.transaction?.date ?? null,
+      ledgerDisbursed: loan.transaction ? loan.transaction.amount : null,
+    }));
+
+    const tally = computeAmountFlowTally({
+      investedNet: (investedCredits._sum.amount || 0) - (investedDebits._sum.amount || 0),
+      records: {
+        contributions: contributionsSum._sum.amount || 0,
+        repayments: repaymentsSum._sum.amount || 0,
+        auctionPayouts: auctionsSum._sum.amount || 0,
+        loanCashGiven: loans.reduce((sum, loan) => sum + loanCashGiven(loan), 0),
+      },
+      ledgerByType,
+      ledgerBalance: balanceSummary.totalBalance,
+      runningBalance: latestTransaction ? latestTransaction.totalBalance ?? 0 : null,
+      loans: tallyLoans,
+      documentCharges,
+    });
+
+    return NextResponse.json(tally);
+  } catch (error) {
+    console.error('Error computing amount flow tally:', error);
+    return NextResponse.json({ error: 'Failed to compute amount flow tally' }, { status: 500 });
+  }
 }
 
 // Helper function to get dashboard summary
@@ -441,7 +535,7 @@ async function getSummary(request: NextRequest, currentUserId: number) {
     // console.log(`Total chit fund profit: ${chitFundProfit}`);
 
     // Use centralized financial calculation system for total metrics
-    const totalMetrics = calculateTotalFinancialMetrics(loansWithRepayments, chitFundsWithDetails as any);
+    const totalMetrics = calculateTotalFinancialMetrics(loansWithRepayments, chitFundsWithDetails);
 
     // Extract values for backward compatibility
     const cashInflow = totalMetrics.totalCashInflow;
@@ -510,7 +604,8 @@ async function getSummary(request: NextRequest, currentUserId: number) {
       outsideAmount,
       outsideAmountBreakdown,
       // Loan-specific flow breakdown (clear view: given vs collected back)
-      loanDisbursed: totalMetrics.loanOutflow,
+      // Principal given (Σ amount): the Loan Portfolio card recovers principal against it.
+      loanDisbursed: totalMetrics.loanPrincipalDisbursed,
       repaymentInflow: totalMetrics.repaymentInflow,
       loanInterestIncome: totalMetrics.interestPayments,
       loanDocumentCharges: totalMetrics.documentCharges,
@@ -722,7 +817,8 @@ async function getFinancialData(request: NextRequest, currentUserId: number) {
         isInPeriod(new Date(l.disbursementDate), periodStart, periodEnd)
       );
 
-      const periodLoanAmount = periodLoans.reduce((sum, l) => sum + l.amount, 0);
+      // Cash given to borrowers (document charges are kept back from the loan).
+      const periodLoanAmount = periodLoans.reduce((sum, l) => sum + loanCashGiven(l), 0);
       // Document charges are now calculated as part of the loan profit
 
       // Get loans with their repayments for this period
@@ -854,7 +950,7 @@ async function getFinancialData(request: NextRequest, currentUserId: number) {
       // console.log(`Period ${formatPeriodLabel(periodStart)}: Found ${updatedPeriodChitFunds.length} chit funds`);
 
       // Calculate chit fund profit using the centralized utility function (consistent with details page)
-      const periodChitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(updatedPeriodChitFunds as any);
+      const periodChitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(updatedPeriodChitFunds);
 
       // Log individual chit fund profits for debugging
       /*
@@ -1104,7 +1200,7 @@ async function getFinancialData(request: NextRequest, currentUserId: number) {
       // Use centralized financial calculation system
       const metrics = calculatePeriodFinancialMetrics(
         periodLoansWithRepayments,
-        periodChitFunds as any,
+        periodChitFunds,
         periodLoanDisbursements,
         periodRange,
         {
@@ -2411,12 +2507,13 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
   const totalCashInflow = contributions.reduce((sum, c) => sum + c.amount, 0) +
                          repayments.reduce((sum, r) => sum + r.amount, 0);
 
+  // Loans count the cash given (amount − document charge, which is kept back from the loan).
   const totalCashOutflow = auctions.reduce((sum, a) => sum + a.amount, 0) +
-                          loans.reduce((sum, l) => sum + l.amount, 0);
+                          loans.reduce((sum, l) => sum + loanCashGiven(l), 0);
 
   // Calculate profits using centralized utility functions
   const loanProfit = calculateTotalLoanProfit(loansWithRepayments);
-  const chitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(chitFundsWithDetails as any);
+  const chitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(chitFundsWithDetails);
   const totalProfit = loanProfit + chitFundProfit;
 
 
@@ -2456,7 +2553,7 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
     const periodContributions = contributions.reduce((sum, c) => sum + c.amount, 0);
     const periodRepayments = repayments.reduce((sum, r) => sum + r.amount, 0);
     const periodAuctions = auctions.reduce((sum, a) => sum + a.amount, 0);
-    const periodLoanAmount = loans.reduce((sum, l) => sum + l.amount, 0);
+    const periodLoanAmount = loans.reduce((sum, l) => sum + loanCashGiven(l), 0);
 
     // Create period range for centralized calculation
     const periodRange = createPeriodRange(startDate, endDate);
@@ -2464,7 +2561,7 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
     // Use centralized financial calculation for accurate period-specific profits
     const periodMetrics = calculatePeriodFinancialMetrics(
       loansWithRepayments,
-      chitFundsWithDetails as any,
+      chitFundsWithDetails,
       loans.map(l => ({ id: l.id, amount: l.amount, documentCharge: l.documentCharge })),
       periodRange
     );
@@ -2554,7 +2651,7 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
         isInPeriod(new Date(l.disbursementDate), periodStart, periodEnd)
       );
 
-      const periodLoanAmount = periodLoans.reduce((sum, l) => sum + l.amount, 0);
+      const periodLoanAmount = periodLoans.reduce((sum, l) => sum + loanCashGiven(l), 0);
 
       // Filter loans and chit funds for this period
       const periodLoansWithRepayments = loansWithRepayments.filter(loan => {
@@ -2571,16 +2668,16 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
         );
       });
 
-      const periodChitFunds = (chitFundsWithDetails as any).filter((fund: any) => {
+      const periodChitFunds = chitFundsWithDetails.filter(fund => {
         // Check if any contributions were made in this period
-        if (fund.contributions && fund.contributions.some((c: any) =>
+        if (fund.contributions && fund.contributions.some(c =>
           isInPeriod(new Date(c.paidDate), periodStart, periodEnd)
         )) {
           return true;
         }
 
         // Check if any auctions were held in this period
-        return fund.auctions && fund.auctions.some((a: any) =>
+        return fund.auctions && fund.auctions.some(a =>
           isInPeriod(new Date(a.date), periodStart, periodEnd)
         );
       });
@@ -2591,7 +2688,7 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
       // Use centralized financial calculation for accurate period-specific profits
       const periodMetrics = calculatePeriodFinancialMetrics(
         periodLoansWithRepayments,
-        periodChitFunds as any,
+        periodChitFunds,
         periodLoans.map(l => ({ id: l.id, amount: l.amount, documentCharge: l.documentCharge })),
         periodRange
       );

@@ -10,7 +10,7 @@
  * - Easier maintenance and debugging
  * - Prevents calculation discrepancies
  */
-
+import { calculateChitFundProfitUpToCurrentMonth } from './financialUtils';
 
 
 // ============================================================================
@@ -44,12 +44,16 @@ export interface LoanWithRepayments {
   }>;
 }
 
+/** Chit fund rows for profit: commission per payout = term contribution (duration months) − payout. */
 export interface ChitFundWithDetails {
   id: number;
   name: string;
   monthlyContribution: number;
-  membersCount?: number;
-  members?: any[];
+  firstMonthContribution?: number | null;
+  duration: number;
+  chitFundType?: string;
+  currentMonth?: number | null;
+  startDate?: Date | string | null;
   contributions: Array<{
     id: number;
     amount: number;
@@ -79,7 +83,10 @@ export interface FinancialMetrics {
   contributionInflow: number;
   repaymentInflow: number;
   auctionOutflow: number;
+  /** Cash given to borrowers: Σ (amount − documentCharge); the charge is kept back from the loan. */
   loanOutflow: number;
+  /** Loan principal disbursed: Σ amount (what borrowers repay against). */
+  loanPrincipalDisbursed: number;
 
   // Outside Amount
   totalOutsideAmount: number;
@@ -119,6 +126,15 @@ export interface PeriodFinancialData {
 // ============================================================================
 // CORE CALCULATION FUNCTIONS
 // ============================================================================
+
+/**
+ * Cash a borrower actually received for a loan. The document charge is kept back from the
+ * loan (never paid separately), so the cash out is amount − documentCharge. Profit still
+ * counts the document charge as income, and principal/remainingAmount stay at the full amount.
+ */
+export function loanCashGiven(loan: { amount: number; documentCharge?: number | null }): number {
+  return (loan.amount || 0) - (loan.documentCharge || 0);
+}
 
 /**
  * Calculate period-specific loan profit
@@ -167,8 +183,6 @@ export function calculatePeriodChitFundProfit(
   totalProfit: number;
   auctionCommissions: number;
 } {
-  const { calculateChitFundProfitUpToCurrentMonth } = require('./financialUtils');
-
   const totalProfit = chitFunds.reduce((sum, fund) => {
     // Filter contributions and auctions to only those in the period
     const periodContributions = periodRange
@@ -203,7 +217,7 @@ export function calculatePeriodChitFundProfit(
 export function calculatePeriodCashFlow(
   loansWithRepayments: LoanWithRepayments[],
   chitFunds: ChitFundWithDetails[],
-  loanDisbursements: Array<{ amount: number }>,
+  loanDisbursements: Array<{ amount: number; documentCharge?: number | null }>,
   periodRange?: PeriodRange
 ): {
   totalCashInflow: number;
@@ -213,6 +227,7 @@ export function calculatePeriodCashFlow(
   repaymentInflow: number;
   auctionOutflow: number;
   loanOutflow: number;
+  loanPrincipalDisbursed: number;
 } {
   // Calculate inflows - filter by period if provided
   const contributionInflow = chitFunds.reduce((sum, fund) => {
@@ -237,7 +252,9 @@ export function calculatePeriodCashFlow(
     return sum + periodAuctions.reduce((s, a) => s + (a.amount || 0), 0);
   }, 0);
 
-  const loanOutflow = loanDisbursements.reduce((sum, loan) => sum + loan.amount, 0);
+  // Cash given to borrowers (document charges are kept back from the loan).
+  const loanOutflow = loanDisbursements.reduce((sum, loan) => sum + loanCashGiven(loan), 0);
+  const loanPrincipalDisbursed = loanDisbursements.reduce((sum, loan) => sum + loan.amount, 0);
 
   const totalCashInflow = contributionInflow + repaymentInflow;
   const totalCashOutflow = auctionOutflow + loanOutflow;
@@ -250,7 +267,8 @@ export function calculatePeriodCashFlow(
     contributionInflow,
     repaymentInflow,
     auctionOutflow,
-    loanOutflow
+    loanOutflow,
+    loanPrincipalDisbursed
   };
 }
 
@@ -372,6 +390,7 @@ export function calculatePeriodFinancialMetrics(
     repaymentInflow: cashFlowData.repaymentInflow,
     auctionOutflow: cashFlowData.auctionOutflow,
     loanOutflow: cashFlowData.loanOutflow,
+    loanPrincipalDisbursed: cashFlowData.loanPrincipalDisbursed,
 
     // Outside Amount
     totalOutsideAmount: outsideAmountData.totalOutsideAmount,
@@ -516,7 +535,6 @@ export function calculateTotalFinancialMetrics(
 
   const chitFundProfit = chitFunds.reduce((sum, fund) => {
     // Use the new function that only considers transactions up to current month
-    const { calculateChitFundProfitUpToCurrentMonth } = require('./financialUtils');
     const fundProfit = calculateChitFundProfitUpToCurrentMonth(fund, fund.contributions, fund.auctions);
     return sum + fundProfit;
   }, 0);
@@ -531,7 +549,9 @@ export function calculateTotalFinancialMetrics(
   const auctionOutflow = chitFunds.reduce((sum, fund) =>
     sum + fund.auctions.reduce((s, a) => s + (a.amount || 0), 0), 0);
 
-  const loanOutflow = loansWithRepayments.reduce((sum, loan) => sum + loan.amount, 0);
+  // Cash given to borrowers (document charges are kept back from the loan).
+  const loanOutflow = loansWithRepayments.reduce((sum, loan) => sum + loanCashGiven(loan), 0);
+  const loanPrincipalDisbursed = loansWithRepayments.reduce((sum, loan) => sum + loan.amount, 0);
 
   const loanRemainingAmount = loansWithRepayments.reduce((sum, loan) => sum + loan.remainingAmount, 0);
 
@@ -549,6 +569,7 @@ export function calculateTotalFinancialMetrics(
     repaymentInflow,
     auctionOutflow,
     loanOutflow,
+    loanPrincipalDisbursed,
     totalOutsideAmount: Math.max(0, totalCashOutflow - totalCashInflow),
     // loanRemainingAmount: Math.max(0, loanOutflow - repaymentInflow),
     loanRemainingAmount: loanRemainingAmount,

@@ -50,7 +50,7 @@ import { cn } from '@/lib/utils';
 
 const TABS = ['overview', 'contributions', 'auctions'] as const;
 type Tab = (typeof TABS)[number];
-type Figure = 'profit' | 'inflow' | 'outflow' | 'outside';
+type Figure = 'profit' | 'inflow' | 'outflow' | 'outside' | 'netCash' | 'owe' | 'held' | 'pending';
 
 function DetailSkeleton() {
   return (
@@ -141,7 +141,14 @@ function ChitFundDetailView() {
   const hasEligibleMembers = auctionsLoaded && (fund.members ?? []).some((member) => !auctions.some((a) => a.winnerId === member.id));
   const canAuction = fund.status === 'Active' || hasEligibleMembers;
   const isFixed = fund.chitFundType === 'Fixed';
-  const figures = fund.derivedFields ?? { totalProfit: 0, cashInflow: 0, cashOutflow: 0, outsideAmount: 0 };
+  const figures = fund.derivedFields ?? {
+    totalProfit: 0, cashInflow: 0, cashOutflow: 0, outsideAmount: 0,
+    netCash: 0, winnersStillOwe: 0, heldForUnpaid: 0, pendingPayouts: 0,
+  };
+  // Sign-led tone: success when positive, loss (red) when negative, neutral ₹0 at zero.
+  const signed = (value: number) => (
+    <Money value={value} tone={value < 0 ? 'loss' : 'plain'} className={value > 0 ? 'text-success-text' : undefined} />
+  );
 
   const exportFund = async () => {
     if (exporting) return;
@@ -212,9 +219,23 @@ function ChitFundDetailView() {
       ? [{ label: '1st month contribution', value: <Money value={fund.firstMonthContribution} tone="plain" />, numeric: true }]
       : []),
     { label: 'Duration', value: `${fund.duration} months`, numeric: true },
-    { label: 'Total profit', value: reveal('profit', 'total profit', <Money value={figures.totalProfit} tone="plain" className="text-success-text" />) },
+    {
+      label: 'Total profit',
+      value: reveal('profit', 'total profit', signed(figures.totalProfit)),
+      hint: revealed.has('profit')
+        ? figures.pendingPayouts !== 0
+          ? 'Net cash + still owe − held + not yet counted'
+          : 'Net cash + still owe − held'
+        : undefined,
+    },
     { label: 'Cash inflow', value: reveal('inflow', 'cash inflow', <Money value={figures.cashInflow} tone="plain" />) },
     { label: 'Cash outflow', value: reveal('outflow', 'cash outflow', <Money value={figures.cashOutflow} tone="plain" />) },
+    { label: 'Net cash (in − out)', value: reveal('netCash', 'net cash', <Money value={figures.netCash} tone={figures.netCash < 0 ? 'loss' : 'plain'} />) },
+    { label: 'Winners still owe', value: reveal('owe', 'winners still owe', <Money value={figures.winnersStillOwe} tone="plain" />) },
+    { label: 'Held for unpaid members', value: reveal('held', 'held for unpaid members', <Money value={figures.heldForUnpaid} tone="plain" />) },
+    ...(figures.pendingPayouts !== 0
+      ? [{ label: 'Payouts not yet counted', value: reveal('pending', 'payouts not yet counted', <Money value={figures.pendingPayouts} tone="plain" />) }]
+      : []),
     ...(figures.outsideAmount > 0
       ? [{ label: 'Outside amount', value: reveal('outside', 'outside amount', <Money value={figures.outsideAmount} tone="plain" />) }]
       : []),

@@ -5,7 +5,8 @@
  * Pure: the route loads the rows, this file only does arithmetic, so it can be unit tested.
  * Profit reuses the dashboard's formulas unchanged:
  *   - loans: calculateLoanProfit (lib/financialUtils.ts) per loan
- *   - chits: calculateChitPayoutCommission (lib/chitCommission.ts) per auction the member WON,
+ *   - chits: calculateChitPayoutCommission (lib/chitCommission.ts) per auction the member WON
+ *     (the fund's term contribution, firstMonthContribution + monthly × (duration − 1), minus the payout),
  *     counted only when month <= the fund's current month and date <= now, the same filter as
  *     calculateChitFundProfitUpToCurrentMonth, so a fund's winners add up to its totalProfit.
  * Cash flow counts every recorded row (contributions, repayments incl. RECOVERY receipts, loan
@@ -24,10 +25,11 @@ export interface SummaryFundInput {
   monthlyContribution: number;
   firstMonthContribution?: number | null;
   membersCount: number;
-  chitFundType?: string | null;
+  chitFundType?: string;
   currentMonth?: number | null;
   startDate?: DateLike | null;
-  duration?: number | null;
+  /** Required: commission is the term contribution (duration months) minus the payout. */
+  duration: number;
 }
 
 export interface SummaryMembershipInput {

@@ -135,7 +135,10 @@ export function computeLoanDuePeriods(loan: LoanLike, range: DateRange, asOf: Da
   return result;
 }
 
-export function getChitExpectedContribution(chitFund: ChitFundLike, month: number): number {
+export function getChitExpectedContribution(
+  chitFund: Pick<ChitFundLike, 'monthlyContribution' | 'firstMonthContribution'>,
+  month: number
+): number {
   const monthly = chitFund.monthlyContribution || 0;
   return month === 1 ? (chitFund.firstMonthContribution ?? monthly) : monthly;
 }

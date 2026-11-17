@@ -62,13 +62,15 @@ import MonthlyFlowCard from '../components/MonthlyFlowCard';
 import YieldMetricsCard from '../components/YieldMetricsCard';
 import LoanProfitCard from '../components/LoanProfitCard';
 import ChitFundMonthlyProfitCard from '../components/ChitFundMonthlyProfitCard';
+import AmountFlowTallyCard from '../components/AmountFlowTallyCard';
 
-// A document load of /dashboard starts its three requests while the page's code is still
+// A document load of /dashboard starts its four requests while the page's code is still
 // being evaluated, not after hydration (the SWR fetch takes over the request in flight).
 if (typeof window !== 'undefined' && window.location.pathname === '/dashboard') {
   prefetchQuery(dashboardKeys.summary());
   prefetchQuery(dashboardKeys.balanceSummary());
   prefetchQuery(dashboardKeys.partnerBalances());
+  prefetchQuery(dashboardKeys.amountFlowTally());
 }
 
 const TABS = ['overview', 'trends', 'collections', 'activities', 'events'] as const;
@@ -253,7 +255,7 @@ function OverviewPanel({ data }: { data: DashboardData }) {
       <section aria-label="Cash flow" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label="Invested amount" icon={PiggyBank} value={<Money value={data.investedAmount || 0} tone="plain" />} hint="Total recorded transactions" />
         <StatCard label="Cash inflow" icon={ArrowUpRight} value={<Money value={data.totalCashInflow} tone="inflow" />} hint="Loan repayments + chit contributions" />
-        <StatCard label="Cash outflow" icon={ArrowDownRight} value={<Money value={data.totalCashOutflow} tone="plain" />} hint="Loan disbursements + auction payouts" />
+        <StatCard label="Cash outflow" icon={ArrowDownRight} value={<Money value={data.totalCashOutflow} tone="plain" />} hint="Cash given to borrowers + auction payouts" />
         <StatCard
           label={
             <span className="inline-flex items-center gap-1.5">
@@ -275,6 +277,8 @@ function OverviewPanel({ data }: { data: DashboardData }) {
           <StatCard label="Chit fund profit" value={<Money value={data.chitFundProfit} tone="auto" />} hint="From auction commissions" />
         </section>
       ) : null}
+
+      <AmountFlowTallyCard />
 
       <section aria-label="Outstanding" className="grid grid-cols-2 gap-3">
         <StatCard

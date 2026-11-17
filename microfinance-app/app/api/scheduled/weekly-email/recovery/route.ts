@@ -4,6 +4,7 @@ import prisma from '../../../../../lib/prisma';
 import { sendEmail, emailTemplates } from '../../../../../lib/emailConfig';
 import * as XLSX from 'xlsx';
 import { logEmailSend } from '../../../../../lib/emailRecovery';
+import { calculateChitFundProfitUpToCurrentMonth } from '../../../../../lib/financialUtils';
 
 // Recovery endpoint for weekly emails
 export async function POST(request: NextRequest) {
@@ -271,13 +272,11 @@ async function getWeeklyFinancialData(userId: number, startDate: Date, endDate: 
 
     chitFund.auctions.forEach(auction => {
       totalCashOutflow += auction.amount;
-
-      // Calculate chit fund profit
-      const expectedContribution = chitFund.totalAmount / chitFund.duration;
-      if (auction.amount < expectedContribution) {
-        chitFundProfit += (expectedContribution - auction.amount);
-      }
     });
+
+    // Chit fund profit: term contribution − payout per counted auction (lib/chitCommission.ts),
+    // over the auctions this report already loaded for its window.
+    chitFundProfit += calculateChitFundProfitUpToCurrentMonth(chitFund, chitFund.contributions, chitFund.auctions);
   });
 
   const totalProfit = loanProfit + chitFundProfit;

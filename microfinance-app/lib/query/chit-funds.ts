@@ -104,14 +104,23 @@ export interface ChitFundMemberRow {
 export interface ChitFundDetail extends Omit<ChitFundRecord, 'hasPendingContribution'> {
   fixedAmounts: ChitFundFixedAmount[];
   template: { id: number; name: string } | null;
-  contributions: { id: number; amount: number; month: number; paidDate: string }[];
-  auctions: { id: number; amount: number; month: number; date: string }[];
+  contributions: { id: number; amount: number; month: number; paidDate: string; memberId: number }[];
+  auctions: { id: number; amount: number; month: number; date: string; winnerId: number }[];
   members: ChitFundMemberRow[];
+  /** totalProfit = netCash + winnersStillOwe − heldForUnpaid + pendingPayouts (exactly). */
   derivedFields?: {
     totalProfit: number;
     cashInflow: number;
     cashOutflow: number;
     outsideAmount: number;
+    /** cashInflow − cashOutflow. */
+    netCash: number;
+    /** Σ over counted winners of term contribution × wins − paid (negative when overpaid). */
+    winnersStillOwe: number;
+    /** Σ paid by members with no counted win. */
+    heldForUnpaid: number;
+    /** Payouts recorded but not yet counted (future month or date). */
+    pendingPayouts: number;
   };
 }
 
