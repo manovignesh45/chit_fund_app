@@ -199,6 +199,8 @@ test('timeline: params, branches per filter, owner scoping and row mapping', asy
   assert.match(list.sql, /ORDER BY a\.at DESC, a\.rank DESC, a\.id DESC/);
   assert.equal(count.values.filter((v) => v === 5).length, 7);
   assert.equal((list.text.match(/"createdById" = \$\d+/g) || []).length, 7, 'every branch is owner-scoped');
+  assert.match(list.sql, /e\.action <> 'collect'/, "collect events are left out (their RECOVERY receipt is the repayment row)");
+  assert.doesNotMatch(list.sql, /WHEN 'collect'/);
 
   assert.equal(r.totalCount, 42);
   assert.equal(r.moneyIn, 7500);
@@ -311,7 +313,7 @@ if (integration) test('database cross-check: per-member profit adds up to the da
       db.auction.count({ where: { winner: { globalMemberId: id }, ...own } }),
       db.loan.count({ where: { borrowerId: id, createdById: sample.owner } }),
       db.repayment.count({ where: { loan: { borrowerId: id, createdById: sample.owner } } }),
-      db.loanRecoveryEvent.count({ where: { loan: { borrowerId: id, createdById: sample.owner } } }),
+      db.loanRecoveryEvent.count({ where: { loan: { borrowerId: id, createdById: sample.owner }, action: { not: 'collect' } } }),
     ]);
     const all = await get(`action=timeline&id=${id}&pageSize=100`);
     assert.equal(all.status, 200);
@@ -341,7 +343,7 @@ if (integration) test('database cross-check: per-member profit adds up to the da
     assert.equal(new Set(keys).size, keys.length);
 
     if (loans) {
-      const loan = await db.loan.findFirst({ where: { borrowerId: id }, select: { id: true, _count: { select: { repayments: true, recoveryEvents: true } } } });
+      const loan = await db.loan.findFirst({ where: { borrowerId: id }, select: { id: true, _count: { select: { repayments: true, recoveryEvents: { where: { action: { not: 'collect' } } } } } } });
       const one = await get(`action=timeline&id=${id}&account=loan-${loan.id}`);
       assert.equal(one.body.totalCount, 1 + loan._count.repayments + loan._count.recoveryEvents);
       assert.ok(one.body.items.every((i) => i.accountKey === `loan-${loan.id}`));

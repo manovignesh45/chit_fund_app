@@ -10,12 +10,14 @@
  *   page, pageSize (at most MAX_PAGE_SIZE)
  *
  * Events: member_created, chit_joined, contribution, auction_won, loan_disbursed, repayment
- * (RECOVERY receipts = offline recovery), recovery_event (LoanRecoveryEvent: mark, collect,
- * settle, restore, reverse). A loan's completion has no stored date, so there is no "closed" event.
+ * (RECOVERY receipts = offline recovery), recovery_event (LoanRecoveryEvent: mark, settle, restore,
+ * reverse). 'collect' events are left out: each one only records a RECOVERY receipt, which is already
+ * its own repayment row with the amount. A loan's completion has no stored date, so there is no
+ * "closed" event.
  *
  * Money: contribution and repayment are 'in'; loan_disbursed (amount − documentCharge, the cash
- * handed over) and auction_won (the payout) are 'out'; everything else has no amount. A recovery
- * receipt is already its own repayment row, so its recovery_event carries no amount (no double count).
+ * handed over) and auction_won (the payout) are 'out'; everything else has no amount (a settle that
+ * also takes a final receipt has that receipt as its own repayment row, so nothing is counted twice).
  *
  * Order: newest first; same instant → later lifecycle step first (rank DESC), then id DESC.
  * All values reach SQL as bound parameters.
@@ -131,7 +133,6 @@ const INTEREST_ONLY = ['interestOnly', 'INTEREST_ONLY'];
 
 const RECOVERY_TITLES: Record<string, string> = {
   mark: 'Marked non-recoverable',
-  collect: 'Recovery collected',
   settle: 'Recovery case settled',
   restore: 'Restored to active',
   reverse: 'Recovery receipt reversed',
@@ -185,7 +186,6 @@ function toItem(r: RawEvent): MemberTimelineItem {
       if (action === 'mark' && r.x1 != null) figures = `Principal outstanding ${money(r.x1)}`;
       else if (action === 'settle' && (r.x1 != null || r.x2 != null)) figures = `Waived ${money(r.x1)} principal, ${money(r.x2)} interest`;
       else if (action === 'reverse' && r.x1 != null) figures = `${money(r.x1)} reversed`;
-      else if (action === 'collect' && r.x1 != null) figures = `${money(r.x1)} received`;
       return { ...base, accountKey: loanKey, accountName: loanName, title: RECOVERY_TITLES[action] ?? 'Recovery update',
         detail: [figures, r.notes || null].filter(Boolean).join(' · ') || null, href: `/loans/${r.loanId}` };
     }
@@ -280,15 +280,15 @@ export async function getMemberTimeline(
           WHEN 'mark' THEN ${detailNumber('principal')}
           WHEN 'settle' THEN ${detailNumber('principalWaived')}
           WHEN 'reverse' THEN ${detailNumber('amountReversed')}
-          WHEN 'collect' THEN ${detailNumber('amountReceived')}
         END`;
     const x2 = Prisma.sql`CASE WHEN e.action = 'settle' THEN ${detailNumber('interestWaived')} END`;
+    // 'collect' only records a RECOVERY receipt, which the repayment branch already lists.
     branches.push(Prisma.sql`
       SELECT 'recovery_event'::text, 6, e.id, e."createdAt", NULL::float8, 'none'::text,
         NULL::int, l.id, NULL::text, NULL::int, l."loanType", l."repaymentType", e.action, e.reason, NULL::text, ${x1}, ${x2}
       FROM "LoanRecoveryEvent" e
       JOIN "Loan" l ON l.id = e."loanId"
-      WHERE l."borrowerId" = ${memberId} AND l."createdById" = ${userId} ${loanFilter}`);
+      WHERE l."borrowerId" = ${memberId} AND l."createdById" = ${userId} AND e.action <> 'collect' ${loanFilter}`);
   }
 
   const skip = (page - 1) * pageSize;
