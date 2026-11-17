@@ -10,7 +10,7 @@
  * - Easier maintenance and debugging
  * - Prevents calculation discrepancies
  */
-
+import { calculateChitFundProfitUpToCurrentMonth } from './financialUtils';
 
 
 // ============================================================================
@@ -44,12 +44,16 @@ export interface LoanWithRepayments {
   }>;
 }
 
+/** Chit fund rows for profit: commission per payout = term contribution (duration months) − payout. */
 export interface ChitFundWithDetails {
   id: number;
   name: string;
   monthlyContribution: number;
-  membersCount?: number;
-  members?: any[];
+  firstMonthContribution?: number | null;
+  duration: number;
+  chitFundType?: string;
+  currentMonth?: number | null;
+  startDate?: Date | string | null;
   contributions: Array<{
     id: number;
     amount: number;
@@ -167,8 +171,6 @@ export function calculatePeriodChitFundProfit(
   totalProfit: number;
   auctionCommissions: number;
 } {
-  const { calculateChitFundProfitUpToCurrentMonth } = require('./financialUtils');
-
   const totalProfit = chitFunds.reduce((sum, fund) => {
     // Filter contributions and auctions to only those in the period
     const periodContributions = periodRange
@@ -516,7 +518,6 @@ export function calculateTotalFinancialMetrics(
 
   const chitFundProfit = chitFunds.reduce((sum, fund) => {
     // Use the new function that only considers transactions up to current month
-    const { calculateChitFundProfitUpToCurrentMonth } = require('./financialUtils');
     const fundProfit = calculateChitFundProfitUpToCurrentMonth(fund, fund.contributions, fund.auctions);
     return sum + fundProfit;
   }, 0);

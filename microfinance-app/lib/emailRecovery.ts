@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { internalAuthHeaders } from './internalAuth';
+import { calculateChitFundProfitUpToCurrentMonth } from './financialUtils';
 
 const prisma = new PrismaClient();
 
@@ -645,13 +646,11 @@ async function getFinancialDataForRecovery(userId: number, startDate: Date, endD
 
     chitFund.auctions.forEach(auction => {
       totalCashOutflow += auction.amount; // Auction payouts
-
-      // Calculate chit fund profit
-      const expectedContribution = chitFund.totalAmount / chitFund.duration;
-      if (auction.amount < expectedContribution) {
-        chitFundProfit += (expectedContribution - auction.amount);
-      }
     });
+
+    // Chit fund profit: term contribution − payout per counted auction (lib/chitCommission.ts),
+    // over the auctions this report already loaded for its window.
+    chitFundProfit += calculateChitFundProfitUpToCurrentMonth(chitFund, chitFund.contributions, chitFund.auctions);
   });
 
   const totalProfit = loanProfit + chitFundProfit;
@@ -779,13 +778,11 @@ async function getWeeklyFinancialDataForRecovery(userId: number, startDate: Date
 
     chitFund.auctions.forEach(auction => {
       totalCashOutflow += auction.amount;
-
-      // Calculate chit fund profit
-      const expectedContribution = chitFund.totalAmount / chitFund.duration;
-      if (auction.amount < expectedContribution) {
-        chitFundProfit += (expectedContribution - auction.amount);
-      }
     });
+
+    // Chit fund profit: term contribution − payout per counted auction (lib/chitCommission.ts),
+    // over the auctions this report already loaded for its window.
+    chitFundProfit += calculateChitFundProfitUpToCurrentMonth(chitFund, chitFund.contributions, chitFund.auctions);
   });
 
   const totalProfit = loanProfit + chitFundProfit;

@@ -1,27 +1,41 @@
-/** Commission belongs to completed payouts, not to member cash awaiting rotation. */
+import { getChitExpectedContribution } from './duesTracker';
+
+/**
+ * Commission is locked in when a member takes the payout: the winner pays the full
+ * term schedule and receives the payout once. It does not depend on membersCount,
+ * enrolment or who the winner is.
+ */
 export interface CommissionFund {
   monthlyContribution: number;
   firstMonthContribution?: number | null;
-  membersCount?: number;
-  members?: unknown[];
+  duration: number;
   chitFundType?: string;
 }
 
+/**
+ * What one member pays over the whole term: Σ getChitExpectedContribution(fund, m) for
+ * m = 1..duration, so month 1 uses firstMonthContribution ?? monthlyContribution for
+ * every fund type (the same rule as the Dues Tracker and addContribution).
+ */
+export function getChitTermContribution(fund: CommissionFund): number {
+  const duration = Math.max(0, Math.floor(fund.duration || 0));
+  let total = 0;
+  for (let month = 1; month <= duration; month++) {
+    total += getChitExpectedContribution(fund, month);
+  }
+  return total;
+}
+
+/** Profit on one payout: the winner's term contribution minus what they receive. */
 export function calculateChitPayoutCommission(
   fund: CommissionFund,
   payout: { amount: number; month?: number },
 ): number {
-  const memberCount = fund.membersCount ?? fund.members?.length ?? 0;
-  const collection = fund.chitFundType === 'Fixed' && payout.month === 1
-    ? (fund.firstMonthContribution ?? fund.monthlyContribution) +
-      fund.monthlyContribution * Math.max(0, memberCount - 1)
-    : fund.monthlyContribution * memberCount;
   // Keep a negative spread visible instead of silently hiding a payout loss.
-  return collection - payout.amount;
+  return getChitTermContribution(fund) - payout.amount;
 }
 
 export interface CommissionTrendFund extends CommissionFund {
-  duration: number;
   currentMonth: number;
   status: string;
   fixedAmounts: { month: number; amount: number }[];

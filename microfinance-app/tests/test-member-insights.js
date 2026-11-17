@@ -26,14 +26,14 @@ const { calculateLoanProfit, calculateTotalLoanProfit, calculateChitFundProfitUp
 const now = new Date('2026-11-17T12:00:00');
 const day = (s) => new Date(`${s}T10:00:00`);
 
-// Fixed fund: 10 members, month 1 collects firstMonthContribution once + 9 × monthly.
+// Fixed fund: a winner pays the term contribution, firstMonthContribution + 9 × monthly = 49,000.
 const fixed = { id: 1, name: 'Fixed 50K', status: 'Active', totalAmount: 50000, monthlyContribution: 5000, firstMonthContribution: 4000,
   membersCount: 10, chitFundType: 'Fixed', currentMonth: 3, startDate: day('2026-09-01'), duration: 10 };
 const auctionFund = { id: 2, name: 'Auction 50K', status: 'Active', totalAmount: 50000, monthlyContribution: 2500, firstMonthContribution: null,
   membersCount: 20, chitFundType: 'Auction', currentMonth: 4, startDate: day('2026-08-01'), duration: 20 };
 
 const memberships = [
-  // A: won month 1 of the Fixed fund → commission 49,000 − 45,000 = 4,000
+  // A: won month 1 of the Fixed fund → commission (4,000 + 9 × 5,000) − 45,000 = 4,000
   { id: 11, joinDate: day('2026-08-25'), chitFund: fixed,
     contributions: [{ amount: 4000, month: 1, paidDate: day('2026-09-02') }, { amount: 5000, month: 2, paidDate: day('2026-10-02') }],
     auctions: [{ id: 101, month: 1, date: day('2026-09-05'), amount: 45000 }] },
@@ -69,7 +69,7 @@ test('buildMemberSummary: chit commission per won auction, with the current-mont
   const s = buildMemberSummary({ id: 5, createdAt: day('2026-06-01') }, memberships, [], now);
   const [a, b, c, d] = s.chits;
   assert.deepEqual(a.won, { auctionId: 101, month: 1, date: day('2026-09-05').toISOString(), payout: 45000, discount: 5000, discountPct: 10, commission: 4000, counted: true });
-  assert.equal(a.commission, 4000, 'Fixed fund month 1: (4,000 + 9 × 5,000) − 45,000');
+  assert.equal(a.commission, 4000, 'term contribution (4,000 + 9 × 5,000) − 45,000');
   assert.equal(a.contributionsPaid, 9000);
   assert.equal(a.monthsPaid, 2);
   assert.equal(b.won, null, 'never won');
@@ -86,6 +86,10 @@ test('buildMemberSummary: chit commission per won auction, with the current-mont
   const fixedAuctions = [...memberships[0].auctions, ...memberships[2].auctions];
   assert.equal(calculateChitFundProfitUpToCurrentMonth(fixed, [], fixedAuctions), 4000);
   assert.equal(calculateChitFundProfitUpToCurrentMonth(auctionFund, [], memberships[3].auctions), 0);
+  // membersCount does not enter the formula: a 1-member fund credits the same 4,000
+  const solo = { ...fixed, membersCount: 1 };
+  const soloSummary = buildMemberSummary({ id: 5, createdAt: day('2026-06-01') }, [{ ...memberships[0], chitFund: solo }], [], now);
+  assert.equal(soloSummary.chits[0].commission, 4000);
 });
 
 test('buildMemberSummary: current month falls back to the start date like calculateChitFundProfitUpToCurrentMonth', () => {

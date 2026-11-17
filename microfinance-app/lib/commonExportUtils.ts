@@ -271,7 +271,7 @@ export async function getFinancialDataForExport(userId: number, startDate: Date,
 
   // Calculate profits using centralized utility functions
   const loanProfit = calculateTotalLoanProfit(loansWithRepayments);
-  const chitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(chitFundsWithDetails as any);
+  const chitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(chitFundsWithDetails);
   const totalProfit = loanProfit + chitFundProfit;
 
   // Calculate outside amount
@@ -342,7 +342,7 @@ export async function getFinancialDataForExport(userId: number, startDate: Date,
     const periodRange = createPeriodRange(startDate, endDate);
     const periodMetrics = calculatePeriodFinancialMetrics(
       loansWithRepayments,
-      chitFundsWithDetails as any,
+      chitFundsWithDetails,
       loans.map(l => ({ id: l.id, amount: l.amount, documentCharge: l.documentCharge })),
       periodRange
     );
@@ -402,15 +402,15 @@ export async function getFinancialDataForExport(userId: number, startDate: Date,
         return (l.disbursementDate && new Date(l.disbursementDate) >= periodStart && new Date(l.disbursementDate) <= periodEnd) ||
           (l.repayments && l.repayments.some(r => new Date(r.paidDate) >= periodStart && new Date(r.paidDate) <= periodEnd));
       });
-      const periodChitFunds = (chitFundsWithDetails as any).filter((fund: any) => {
-        if (fund.contributions && fund.contributions.some((c: any) => new Date(c.paidDate) >= periodStart && new Date(c.paidDate) <= periodEnd)) return true;
-        return fund.auctions && fund.auctions.some((a: any) => new Date(a.date) >= periodStart && new Date(a.date) <= periodEnd);
+      const periodChitFunds = chitFundsWithDetails.filter(fund => {
+        if (fund.contributions && fund.contributions.some(c => new Date(c.paidDate) >= periodStart && new Date(c.paidDate) <= periodEnd)) return true;
+        return fund.auctions && fund.auctions.some(a => new Date(a.date) >= periodStart && new Date(a.date) <= periodEnd);
       });
 
       const periodRange = createPeriodRange(periodStart, periodEnd);
       const periodMetrics = calculatePeriodFinancialMetrics(
         periodLoansWithRepayments,
-        periodChitFunds as any,
+        periodChitFunds,
         periodLoans.map(l => ({ id: l.id, amount: l.amount, documentCharge: l.documentCharge })),
         periodRange
       );

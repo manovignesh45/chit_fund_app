@@ -5,13 +5,15 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
-const { calculateChitPayoutCommission, calculateChitCommissionTrends } = require('../lib/chitCommission');
+const { calculateChitPayoutCommission, calculateChitCommissionTrends, getChitTermContribution } = require('../lib/chitCommission');
 const { calculateChitFundProfit, calculateChitFundProfitUpToCurrentMonth, calculateLoanProfit } = require('../lib/financialUtils');
 const { calculateTotalFinancialMetrics, calculatePeriodFinancialMetrics } = require('../lib/centralizedFinancialCalculations');
 const LoanReturn = require('../app/components/BusinessROICard').default;
 const BusinessEarnings = require('../app/components/YieldMetricsCard').default;
 const CapitalPosition = require('../app/components/CapitalUtilizationCard').default;
 
+// Term contribution = 5,000 + 4,800 × (3 − 1) = 14,600; commission = 14,600 − payout.
+// Payouts are larger than this short term's schedule, so every commission here is a loss.
 const fund = {
   monthlyContribution: 4800, firstMonthContribution: 5000, membersCount: 10,
   chitFundType: 'Fixed', currentMonth: 2, duration: 3, status: 'Active',
@@ -23,31 +25,41 @@ const fund = {
   contributions: [{ id: 1, month: 1, amount: 48200, paidDate: new Date('2026-08-10') }],
 };
 
-test('fixed commission respects first-month rules and actual payout amounts', () => {
-  assert.equal(calculateChitPayoutCommission(fund, fund.auctions[0]), 8200);
-  assert.equal(calculateChitPayoutCommission(fund, fund.auctions[1]), 3000);
-  assert.equal(calculateChitPayoutCommission({ ...fund, firstMonthContribution: null }, fund.auctions[0]), 8000);
-  assert.equal(calculateChitPayoutCommission({ ...fund, chitFundType: 'Auction' }, fund.auctions[0]), 8000);
-  assert.equal(calculateChitPayoutCommission(fund, { month: 2, amount: 49000 }), -1000);
+test('commission is the term contribution minus the payout, for every fund type', () => {
+  assert.equal(getChitTermContribution(fund), 14600);
+  assert.equal(calculateChitPayoutCommission(fund, fund.auctions[0]), -25400); // 14,600 − 40,000
+  assert.equal(calculateChitPayoutCommission(fund, fund.auctions[1]), -30400); // 14,600 − 45,000
+  // No first-month override: 4,800 × 3 = 14,400
+  assert.equal(calculateChitPayoutCommission({ ...fund, firstMonthContribution: null }, fund.auctions[0]), -25600);
+  // The first-month override applies to Auction funds too (same rule as the Dues Tracker)
+  assert.equal(calculateChitPayoutCommission({ ...fund, chitFundType: 'Auction' }, fund.auctions[0]), -25400);
+  assert.equal(calculateChitPayoutCommission(fund, { month: 2, amount: 49000 }), -34400);
+  // Independent of membersCount / enrolment and of the payout month
+  assert.equal(calculateChitPayoutCommission({ ...fund, membersCount: 1 }, fund.auctions[0]), -25400);
+  assert.equal(calculateChitPayoutCommission(fund, { month: 3, amount: 40000 }), -25400);
+  // Missing or non-positive duration collects nothing
+  assert.equal(getChitTermContribution({ ...fund, duration: 0 }), 0);
+  assert.equal(getChitTermContribution({ ...fund, duration: -2 }), 0);
+  assert.equal(getChitTermContribution({ ...fund, duration: undefined }), 0);
 });
 
 test('unpaid payout cash and member contributions are not income', () => {
   assert.equal(calculateChitFundProfit(fund, fund.contributions, []), 0);
   assert.equal(calculateChitFundProfitUpToCurrentMonth(fund, fund.contributions, []), 0);
-  assert.equal(calculateChitFundProfitUpToCurrentMonth(fund, fund.contributions, fund.auctions), 11200);
-  assert.equal(calculateChitFundProfitUpToCurrentMonth({ ...fund, currentMonth: 1 }, [], fund.auctions), 8200);
-  assert.equal(calculateChitFundProfit(fund, [], [{ amount: 49000, month: 2 }]), -1000);
+  assert.equal(calculateChitFundProfitUpToCurrentMonth(fund, fund.contributions, fund.auctions), -55800);
+  assert.equal(calculateChitFundProfitUpToCurrentMonth({ ...fund, currentMonth: 1 }, [], fund.auctions), -25400);
+  assert.equal(calculateChitFundProfit(fund, [], [{ amount: 49000, month: 2 }]), -34400);
 });
 
 test('monthly commission and lifetime total reconcile; projection is separate', () => {
   const result = calculateChitCommissionTrends([fund], 6, new Date('2026-10-08'));
   assert.equal(result.months.length, 6);
   assert.equal(result.months.reduce((sum, row) => sum + row.commission, 0), result.summary.commission);
-  assert.equal(result.summary.commission, 11200);
-  assert.equal(result.summary.expectedRemainingCommission, 1000);
+  assert.equal(result.summary.commission, -55800);
+  assert.equal(result.summary.expectedRemainingCommission, -32400); // month 3 plan: 14,600 − 47,000
   assert.equal(result.summary.collectionPayoutBalance, -36800);
-  assert.equal(result.months.find(row => row.key === '2026-08').commission, 8200);
-  assert.equal(result.months.find(row => row.key === '2026-09').commission, 3000);
+  assert.equal(result.months.find(row => row.key === '2026-08').commission, -25400);
+  assert.equal(result.months.find(row => row.key === '2026-09').commission, -30400);
 });
 
 test('missing schedules are unknown, and future payouts and collections are excluded', () => {
@@ -57,9 +69,9 @@ test('missing schedules are unknown, and future payouts and collections are excl
     auctions: [...fund.auctions, { month: 3, amount: 47000, date: '2026-11-01' }],
     contributions: [...fund.contributions, { amount: 1000, paidDate: '2026-11-01' }],
   }], 6, new Date('2026-10-08'));
-  assert.equal(result.summary.commission, 11200);
+  assert.equal(result.summary.commission, -55800);
   assert.equal(result.summary.collections, 48200);
-  assert.equal(result.summary.expectedRemainingCommission, 1000);
+  assert.equal(result.summary.expectedRemainingCommission, -32400);
   assert.equal(calculateChitCommissionTrends([{ ...fund, status: 'Completed' }], 6).summary.expectedRemainingCommission, 0);
 });
 
@@ -73,15 +85,51 @@ test('weekly loan income includes document charges and excess repayment once', (
   assert.equal(total.loanProfit, 1500);
   assert.equal(total.interestPayments, 1000);
   assert.equal(total.documentCharges, 500);
-  assert.equal(total.chitFundProfit, 11200);
-  assert.equal(total.totalProfit, 12700);
+  assert.equal(total.chitFundProfit, -55800);
+  assert.equal(total.totalProfit, -54300); // 1,500 − 55,800
 });
 
 test('monthly and lifetime commission use the same completed-payout formula', () => {
   const result = calculatePeriodFinancialMetrics([], [fund], [], {
     startDate: new Date('2026-09-01'), endDate: new Date('2026-09-30T23:59:59'),
   });
-  assert.equal(result.chitFundProfit, 3000);
+  assert.equal(result.chitFundProfit, -30400);
+});
+
+// Real-world shapes: monthly 4,800, first month 5,000, 10 months → term contribution 48,200.
+const FIXED_PLAN = [43000, 43700, 44400, 45200, 46000, 46800, 47600, 48500, 49300, 50000];
+const fund50k = {
+  monthlyContribution: 4800, firstMonthContribution: 5000, duration: 10, chitFundType: 'Fixed', currentMonth: 10,
+};
+const payouts = (amounts, months) => amounts.map((amount, i) => ({ amount, month: months ? months[i] : i + 1, date: new Date('2026-01-01') }));
+
+test('scenario: 1-member fund, one payout in month 6', () => {
+  const f = { ...fund50k, membersCount: 1, currentMonth: 6 };
+  assert.equal(getChitTermContribution(f), 48200);
+  assert.equal(calculateChitPayoutCommission(f, { month: 6, amount: 46800 }), 1400);
+  assert.equal(calculateChitFundProfitUpToCurrentMonth(f, [], payouts([46800], [6])), 1400);
+});
+
+test('scenario: 11 members on a 10-month fund', () => {
+  // The fixed plan (464,500) plus a second month-1 payout of 35,800 → 500,300 paid out.
+  const auctions = [...payouts(FIXED_PLAN), ...payouts([35800], [1])];
+  assert.equal(auctions.reduce((sum, a) => sum + a.amount, 0), 500300);
+  // 11 × 48,200 − 500,300 = 530,200 − 500,300
+  assert.equal(calculateChitFundProfitUpToCurrentMonth({ ...fund50k, membersCount: 10 }, [], auctions), 29900);
+});
+
+test('scenario: 30k fund with 3 members, all paid out', () => {
+  const f = { monthlyContribution: 2850, firstMonthContribution: 3000, duration: 10, chitFundType: 'Fixed', currentMonth: 10, membersCount: 10 };
+  assert.equal(getChitTermContribution(f), 28650); // 3,000 + 9 × 2,850
+  // 3 × 28,650 − (25,500 + 26,000 + 26,600) = 85,950 − 78,100
+  assert.equal(calculateChitFundProfit(f, [], payouts([25500, 26000, 26600])), 7850);
+});
+
+test('scenario: full 10-member fund, one auction per planned amount', () => {
+  // 10 × 48,200 − 464,500 = 482,000 − 464,500
+  assert.equal(calculateChitFundProfit({ ...fund50k, membersCount: 10 }, [], payouts(FIXED_PLAN)), 17500);
+  const total = calculateTotalFinancialMetrics([], [{ ...fund50k, id: 1, name: 'x', contributions: [], auctions: payouts(FIXED_PLAN) }]);
+  assert.equal(total.chitFundProfit, 17500);
 });
 
 test('loan return excludes chit earnings; zero/negative capital is unavailable', () => {

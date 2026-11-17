@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
       where: { createdById: currentUserId },
       select: {
         monthlyContribution: true, firstMonthContribution: true,
-        membersCount: true, chitFundType: true, duration: true, currentMonth: true, status: true,
+        chitFundType: true, duration: true, currentMonth: true, status: true,
         fixedAmounts: { select: { month: true, amount: true } },
         contributions: { select: { amount: true, paidDate: true } },
         auctions: { select: { amount: true, month: true, date: true } },

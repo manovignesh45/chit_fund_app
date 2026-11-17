@@ -5,6 +5,12 @@
 import { Loan, Repayment, Contribution, Auction } from '@prisma/client';
 import { calculateChitPayoutCommission, CommissionFund } from './chitCommission';
 
+/** A chit fund as the "up to current month" profit helpers need it. */
+export type ChitProfitFund = CommissionFund & {
+  currentMonth?: number | null;
+  startDate?: string | Date | null;
+};
+
 /**
  * Calculate profit for a loan based on its type and repayments
  * @param loan The loan object
@@ -82,10 +88,12 @@ export function calculateLoanProfit(
 }
 
 /**
- * Calculate profit for a chit fund based on its contributions and auctions
- * @param chitFund The chit fund object
- * @param contributions Array of contributions for the chit fund
- * @param auctions Array of auctions for the chit fund
+ * Calculate profit for a chit fund: Σ calculateChitPayoutCommission over the given auctions,
+ * i.e. per payout getChitTermContribution(fund) − payout.amount (what the winner pays over the
+ * whole term minus what they receive). Independent of membersCount and enrolment.
+ * @param chitFund The chit fund (monthlyContribution, firstMonthContribution, duration)
+ * @param contributions Unused; contributions are member cash, not income
+ * @param auctions The auctions (payouts) to count
  * @returns The calculated profit
  */
 export function calculateChitFundProfit(
@@ -97,26 +105,17 @@ export function calculateChitFundProfit(
 }
 
 /**
- * Calculate profit for a chit fund up to the current month only
- * This provides a more accurate profit calculation that doesn't include future projected amounts
- * @param chitFund The chit fund object with currentMonth information
+ * Calculate profit for a chit fund up to the current month only: calculateChitFundProfit over
+ * auctions with month <= currentMonth and date <= now (term contribution − payout per auction).
+ * @param chitFund The chit fund with duration, firstMonthContribution and currentMonth/startDate
  * @param contributions Array of contributions for the chit fund
  * @param auctions Array of auctions for the chit fund
  * @returns The calculated profit up to current month
  */
 export function calculateChitFundProfitUpToCurrentMonth(
-  chitFund: {
-    monthlyContribution: number;
-    firstMonthContribution?: number;
-    membersCount?: number;
-    members?: any[];
-    currentMonth?: number;
-    startDate?: string | Date;
-    duration?: number;
-    chitFundType?: string;
-  },
-  contributions: Pick<Contribution, 'amount' | 'month'>[] = [],
-  auctions: (Pick<Auction, 'amount' | 'month'> & { date?: Date })[] = []
+  chitFund: ChitProfitFund,
+  contributions: { amount: number; month?: number }[] = [],
+  auctions: { amount: number; month?: number; date?: Date | string }[] = []
 ): number {
   // Determine the current month
   let currentMonth = chitFund.currentMonth || 1;
@@ -160,15 +159,12 @@ export function calculateTotalLoanProfit(
 }
 
 /**
- * Calculate total profit from multiple chit funds
+ * Calculate total profit from multiple chit funds (Σ calculateChitFundProfit, all auctions)
  * @param chitFunds Array of chit funds with their contributions and auctions
  * @returns The total profit from all chit funds
  */
 export function calculateTotalChitFundProfit(
-  chitFunds: Array<{
-    monthlyContribution: number;
-    membersCount?: number;
-    members?: any[];
+  chitFunds: Array<CommissionFund & {
     contributions: Pick<Contribution, 'amount'>[],
     auctions: Pick<Auction, 'amount'>[]
   }>
@@ -181,20 +177,12 @@ export function calculateTotalChitFundProfit(
 
 /**
  * Calculate total profit from multiple chit funds up to current month only
- * This provides consistent profit calculation across the application
+ * (Σ calculateChitFundProfitUpToCurrentMonth: term contribution − payout per counted auction)
  * @param chitFunds Array of chit funds with their contributions and auctions
  * @returns The total profit from all chit funds up to current month
  */
 export function calculateTotalChitFundProfitUpToCurrentMonth(
-  chitFunds: Array<{
-    monthlyContribution: number;
-    firstMonthContribution?: number;
-    membersCount?: number;
-    members?: any[];
-    currentMonth?: number;
-    startDate?: string | Date;
-    duration?: number;
-    chitFundType?: string;
+  chitFunds: Array<ChitProfitFund & {
     contributions: Pick<Contribution, 'amount' | 'month'>[],
     auctions: Pick<Auction, 'amount' | 'month'>[]
   }>

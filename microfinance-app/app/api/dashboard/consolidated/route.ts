@@ -441,7 +441,7 @@ async function getSummary(request: NextRequest, currentUserId: number) {
     // console.log(`Total chit fund profit: ${chitFundProfit}`);
 
     // Use centralized financial calculation system for total metrics
-    const totalMetrics = calculateTotalFinancialMetrics(loansWithRepayments, chitFundsWithDetails as any);
+    const totalMetrics = calculateTotalFinancialMetrics(loansWithRepayments, chitFundsWithDetails);
 
     // Extract values for backward compatibility
     const cashInflow = totalMetrics.totalCashInflow;
@@ -854,7 +854,7 @@ async function getFinancialData(request: NextRequest, currentUserId: number) {
       // console.log(`Period ${formatPeriodLabel(periodStart)}: Found ${updatedPeriodChitFunds.length} chit funds`);
 
       // Calculate chit fund profit using the centralized utility function (consistent with details page)
-      const periodChitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(updatedPeriodChitFunds as any);
+      const periodChitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(updatedPeriodChitFunds);
 
       // Log individual chit fund profits for debugging
       /*
@@ -1104,7 +1104,7 @@ async function getFinancialData(request: NextRequest, currentUserId: number) {
       // Use centralized financial calculation system
       const metrics = calculatePeriodFinancialMetrics(
         periodLoansWithRepayments,
-        periodChitFunds as any,
+        periodChitFunds,
         periodLoanDisbursements,
         periodRange,
         {
@@ -2416,7 +2416,7 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
 
   // Calculate profits using centralized utility functions
   const loanProfit = calculateTotalLoanProfit(loansWithRepayments);
-  const chitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(chitFundsWithDetails as any);
+  const chitFundProfit = calculateTotalChitFundProfitUpToCurrentMonth(chitFundsWithDetails);
   const totalProfit = loanProfit + chitFundProfit;
 
 
@@ -2464,7 +2464,7 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
     // Use centralized financial calculation for accurate period-specific profits
     const periodMetrics = calculatePeriodFinancialMetrics(
       loansWithRepayments,
-      chitFundsWithDetails as any,
+      chitFundsWithDetails,
       loans.map(l => ({ id: l.id, amount: l.amount, documentCharge: l.documentCharge })),
       periodRange
     );
@@ -2571,16 +2571,16 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
         );
       });
 
-      const periodChitFunds = (chitFundsWithDetails as any).filter((fund: any) => {
+      const periodChitFunds = chitFundsWithDetails.filter(fund => {
         // Check if any contributions were made in this period
-        if (fund.contributions && fund.contributions.some((c: any) =>
+        if (fund.contributions && fund.contributions.some(c =>
           isInPeriod(new Date(c.paidDate), periodStart, periodEnd)
         )) {
           return true;
         }
 
         // Check if any auctions were held in this period
-        return fund.auctions && fund.auctions.some((a: any) =>
+        return fund.auctions && fund.auctions.some(a =>
           isInPeriod(new Date(a.date), periodStart, periodEnd)
         );
       });
@@ -2591,7 +2591,7 @@ async function getFinancialDataForExport(userId: number, startDate: Date, endDat
       // Use centralized financial calculation for accurate period-specific profits
       const periodMetrics = calculatePeriodFinancialMetrics(
         periodLoansWithRepayments,
-        periodChitFunds as any,
+        periodChitFunds,
         periodLoans.map(l => ({ id: l.id, amount: l.amount, documentCharge: l.documentCharge })),
         periodRange
       );
