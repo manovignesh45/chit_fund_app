@@ -57,8 +57,8 @@ export function dropQueries(tag: QueryTag): void {
   void mutateRef((key) => matches(key, tag), undefined, { revalidate: false });
 }
 
-/** Money-related views that change after any financial write (SPEC "Invalidation"). */
-export const MONEY_TAGS: readonly QueryTag[] = ['dashboard', 'dues', 'transactions', 'calendar', 'trends', 'activities'];
+/** Money-related views that change after any financial write (SPEC "Invalidation"); 'reports' is the tax report (lib/query/reports.ts). */
+export const MONEY_TAGS: readonly QueryTag[] = ['dashboard', 'dues', 'transactions', 'calendar', 'trends', 'activities', 'reports'];
 
 /** Revalidate everything that is cached (e.g. after switching the active partner). */
 export async function revalidateAll(): Promise<void> {

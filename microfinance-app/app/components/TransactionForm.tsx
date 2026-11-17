@@ -5,8 +5,9 @@
  * Three steps: edit → review (balance impact) → done. Used in the transactions page's
  * "Record transaction" dialog and inline on the partners page.
  *
- * The POST body and the x-active-partner header are exactly what this form always sent;
- * validation is lib/transactionValidation.ts (shared with the server).
+ * The POST body and the x-active-partner header are what this form always sent, plus
+ * `category` for Record Amount (lib/recordAmountCategories.ts); validation is
+ * lib/transactionValidation.ts (shared with the server).
  */
 import * as React from 'react';
 import { ArrowLeftRight, CheckCircle2, Loader2, Minus, Plus } from 'lucide-react';
@@ -22,8 +23,11 @@ import {
   NOTE_MAX_LENGTH,
   NOTE_MIN_LENGTH,
   NOTE_SUGGESTIONS,
+  recordAmountCategoriesFor,
+  recordAmountCategoryLabel,
   type FieldErrors,
 } from '../../lib/transactionValidation';
+import { categoryAllowsDirection, isRecordAmountCategory, type RecordAmountDirection } from '../../lib/recordAmountCategories';
 import { usePartnerBalances } from '@/lib/query/dashboard';
 import { invalidateTransactions, transactionWrites, type ManualTransactionBody } from '@/lib/query/transactions';
 import { ApiError } from '@/lib/query/fetcher';
@@ -74,14 +78,20 @@ function ChoiceCards<V extends string>({
   value,
   onChange,
   options,
+  className,
+  ...aria
 }: {
   label: string;
   value: V;
   onChange: (value: V) => void;
   options: { value: V; label: React.ReactNode; description: string }[];
+  /** Grid columns (default two). */
+  className?: string;
+  'aria-describedby'?: string;
+  'aria-invalid'?: boolean;
 }) {
   return (
-    <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label={label}>
+    <div className={cn('grid grid-cols-2 gap-2', className)} role="radiogroup" aria-label={label} {...aria}>
       {options.map((o) => {
         const active = value === o.value;
         return (
@@ -121,13 +131,14 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
   const [adjustmentType, setAdjustmentType] = React.useState<'credit' | 'debit'>('credit');
   const [date, setDate] = React.useState(todayISO());
   const [note, setNote] = React.useState('');
+  const [category, setCategory] = React.useState('');
 
   const [step, setStep] = React.useState<Step>('edit');
   const [showErrors, setShowErrors] = React.useState(false);
   const [serverFieldErrors, setServerFieldErrors] = React.useState<FieldErrors>({});
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState('');
-  const [lastSummary, setLastSummary] = React.useState<null | { title: string; impacts: BalanceImpact[]; note: string }>(null);
+  const [lastSummary, setLastSummary] = React.useState<null | { title: string; impacts: BalanceImpact[]; note: string; category: string | null }>(null);
 
   const isTransfer = type === TRANSACTION_TYPES_CONFIG.PARTNER_TO_PARTNER;
 
@@ -142,6 +153,13 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
     setServerFieldErrors({});
   };
 
+  /** Credit/debit; a category the new direction does not allow is cleared. */
+  const changeDirection = (direction: RecordAmountDirection) => {
+    setAdjustmentType(direction);
+    setCategory((current) => (isRecordAmountCategory(current) && categoryAllowsDirection(current, direction) ? current : ''));
+    setServerFieldErrors({});
+  };
+
   const handleTypeChange = (newType: string) => {
     setType(newType);
     resetFeedback();
@@ -151,7 +169,7 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
       setFromPartnerId(fromId);
       setToPartnerId(fromId ? pickDefaultTo(fromId, '') : '');
     } else {
-      setAdjustmentType('credit');
+      changeDirection('credit');
     }
   };
 
@@ -184,8 +202,9 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
       note,
       from_partner_id: adjustmentType === 'debit' ? id : null,
       to_partner_id: adjustmentType === 'credit' ? id : null,
+      category,
     };
-  }, [isTransfer, type, amount, date, note, fromPartnerId, toPartnerId, adjustmentType, selectedPartner]);
+  }, [isTransfer, type, amount, date, note, fromPartnerId, toPartnerId, adjustmentType, selectedPartner, category]);
 
   const validation = React.useMemo(() => validateManualTransaction(payload), [payload]);
   const clientErrors: FieldErrors = validation.ok ? {} : (validation as { errors: FieldErrors }).errors;
@@ -230,10 +249,11 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
     resetFeedback();
     try {
       await transactionWrites.create({ ...payload, note: normalizeNote(note) }, selectedPartner?.name || '');
-      setLastSummary({ title: summaryTitle, impacts, note: normalizeNote(note) });
+      setLastSummary({ title: summaryTitle, impacts, note: normalizeNote(note), category: isTransfer ? null : category });
       setStep('done');
       setAmount('');
       setNote('');
+      setCategory('');
       setShowErrors(false);
       toast.success('Transaction recorded', { description: summaryTitle });
       void invalidateTransactions();
@@ -257,7 +277,8 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
             Transaction recorded
           </p>
           <p className="mt-1 text-sm text-foreground">{lastSummary.title}</p>
-          <p className="mt-2 text-xs text-muted-foreground">Reason: {lastSummary.note}</p>
+          {lastSummary.category ? <p className="mt-2 text-xs text-muted-foreground">Category: {recordAmountCategoryLabel(lastSummary.category)}</p> : null}
+          <p className={cn('text-xs text-muted-foreground', lastSummary.category ? 'mt-0.5' : 'mt-2')}>Reason: {lastSummary.note}</p>
         </div>
         <ImpactTable impacts={lastSummary.impacts} />
         <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
@@ -282,6 +303,12 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
         <dl className="grid grid-cols-3 gap-2 text-sm">
           <dt className="text-muted-foreground">Date</dt>
           <dd className="col-span-2 text-foreground">{formatDate(date)}</dd>
+          {!isTransfer ? (
+            <>
+              <dt className="text-muted-foreground">Category</dt>
+              <dd className="col-span-2 text-foreground">{recordAmountCategoryLabel(category)}</dd>
+            </>
+          ) : null}
           <dt className="text-muted-foreground">Reason</dt>
           <dd className="col-span-2 break-words text-foreground">{normalizeNote(note)}</dd>
           <dt className="text-muted-foreground">Entered by</dt>
@@ -355,7 +382,7 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
           <ChoiceCards
             label="Credit or debit"
             value={adjustmentType}
-            onChange={(v) => setAdjustmentType(v as 'credit' | 'debit')}
+            onChange={(v) => changeDirection(v as RecordAmountDirection)}
             options={[
               { value: 'credit', label: <span className="inline-flex items-center gap-1"><Plus aria-hidden="true" className="h-3.5 w-3.5" />Credit</span>, description: 'Add cash' },
               { value: 'debit', label: <span className="inline-flex items-center gap-1"><Minus aria-hidden="true" className="h-3.5 w-3.5" />Debit</span>, description: 'Remove cash' },
@@ -364,6 +391,30 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
           {errors.to_partner_id ? <p className="text-xs font-medium text-destructive-text">{errors.to_partner_id}</p> : null}
         </div>
       )}
+
+      {!isTransfer ? (
+        <div className="space-y-2">
+          <span id="tf-category-label" className="block text-sm font-medium text-foreground">
+            Category <span className="text-destructive-text" aria-hidden="true">*</span>
+            <span className="sr-only">(required)</span>
+          </span>
+          <ChoiceCards
+            label={`Category (${adjustmentType} categories)`}
+            value={category}
+            onChange={(v) => {
+              setCategory(v);
+              setServerFieldErrors({});
+            }}
+            options={recordAmountCategoriesFor(adjustmentType).map((c) => ({ value: c.value, label: c.label, description: c.hint }))}
+            className="grid-cols-1 sm:grid-cols-2"
+            aria-describedby="tf-category-help"
+            aria-invalid={!!errors.category || undefined}
+          />
+          <p id="tf-category-help" className={cn('text-xs', errors.category ? 'font-medium text-destructive-text' : 'text-muted-foreground')}>
+            {errors.category || `Showing ${adjustmentType} categories. Decides where this entry appears in the tax report.`}
+          </p>
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <FormField label="Amount" error={errors.amount} description={amountValue > 0 ? money2(amountValue) : undefined} id="tf-amount">
@@ -395,18 +446,20 @@ export default function TransactionForm({ onSuccess, onClose }: TransactionFormP
             {noteLength}/{NOTE_MAX_LENGTH}
           </span>
         </div>
-        <div className="flex flex-wrap gap-1.5">
-          {suggestions.map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setNote((prev) => (prev.trim() ? prev : `${s}: `))}
-              className="rounded-full border px-2 py-1 text-xs text-muted-foreground hover:border-primary hover:text-primary-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {s}
-            </button>
-          ))}
-        </div>
+        {suggestions.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
+            {suggestions.map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setNote((prev) => (prev.trim() ? prev : `${s}: `))}
+                className="rounded-full border px-2 py-1 text-xs text-muted-foreground hover:border-primary hover:text-primary-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <Textarea
           id="tf-note"
           value={note}

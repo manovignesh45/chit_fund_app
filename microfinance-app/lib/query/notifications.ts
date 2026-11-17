@@ -32,6 +32,8 @@ export interface NotificationDetails {
   direction?: 'transfer' | 'credit' | 'debit';
   amount?: number;
   reason?: string;
+  /** RECORD_AMOUNT category at the time it was recorded (lib/recordAmountCategories.ts). */
+  category?: string | null;
   date?: string;
   fromPartner?: string | null;
   toPartner?: string | null;
@@ -59,6 +61,7 @@ export interface NotificationTransactionRow {
   amount: number;
   date: string;
   note: string | null;
+  category?: string | null;
   from_partner: string | null;
   to_partner: string | null;
   entered_by: string;
