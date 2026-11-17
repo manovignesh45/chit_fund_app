@@ -3,7 +3,8 @@ import prisma from '../../../../lib/prisma';
 import { getCurrentUserId, getActorUserId } from '../../../../lib/auth';
 import { TRANSACTION_TYPES_CONFIG } from '../../../../config/config';
 import { calculateTransactionBalance, getCurrentPartnerBalance, getCurrentTotalBalance, recalculateBalancesAfterDeletion } from '../../../../lib/balanceCalculator';
-import { calculateChitFundProfitUpToCurrentMonth, calculateChitFundOutsideAmount } from '../../../../lib/financialUtils';
+import { calculateChitFundOutsideAmount } from '../../../../lib/financialUtils';
+import { calculateChitProfitReconciliation } from '../../../../lib/chitCommission';
 import { autoUpdateCurrentMonths, invalidateCurrentMonths } from '../../../../lib/timeUtils';
 import { notifyOtherAdmins, getActorName } from '../../../../lib/notifications';
 import { BalancePaymentError, planBalancePayment } from '../../../../lib/contributionBalance';
@@ -566,7 +567,8 @@ async function getChitFundDetail(request: NextRequest, id: number, currentUserId
           id: true,
           amount: true,
           month: true,
-          paidDate: true
+          paidDate: true,
+          memberId: true
         }
       },
       auctions: {
@@ -574,7 +576,8 @@ async function getChitFundDetail(request: NextRequest, id: number, currentUserId
           id: true,
           amount: true,
           month: true,
-          date: true
+          date: true,
+          winnerId: true
         }
       },
       members: true
@@ -609,8 +612,10 @@ async function getChitFundDetail(request: NextRequest, id: number, currentUserId
   const cashInflow = chitFund.contributions.reduce((sum, contribution) => sum + contribution.amount, 0);
   const cashOutflow = chitFund.auctions.reduce((sum, auction) => sum + auction.amount, 0);
 
-  // Calculate total profit using the same utility function as frontend
-  const totalProfit = calculateChitFundProfitUpToCurrentMonth(chitFund, chitFund.contributions, chitFund.auctions);
+  // Profit and its cash reconciliation: profit = netCash + winnersStillOwe − heldForUnpaid
+  // + pendingPayouts. The helper counts the same auctions as calculateChitFundProfitUpToCurrentMonth.
+  const { profit: totalProfit, netCash, winnersStillOwe, heldForUnpaid, pendingPayouts } =
+    calculateChitProfitReconciliation(chitFund, chitFund.contributions, chitFund.auctions);
 
   // Calculate outside amount using the same utility function as frontend
   const outsideAmount = calculateChitFundOutsideAmount(chitFund, chitFund.contributions, chitFund.auctions);
@@ -622,7 +627,11 @@ async function getChitFundDetail(request: NextRequest, id: number, currentUserId
       totalProfit,
       cashInflow,
       cashOutflow,
-      outsideAmount
+      outsideAmount,
+      netCash,
+      winnersStillOwe,
+      heldForUnpaid,
+      pendingPayouts
     }
   };
 
@@ -1839,6 +1848,14 @@ async function updateAuction(request: NextRequest, id: number, currentUserId: nu
     });
     if (!winner) {
       return NextResponse.json({ error: 'Winner not found in this chit fund' }, { status: 404 });
+    }
+    // Same rule as addAuction: one win per member (per-winner profit assumes it).
+    const existingWinner = await prisma.auction.findFirst({
+      where: { chitFundId: id, winnerId: winner.id, id: { not: auction.id } },
+      select: { id: true },
+    });
+    if (existingWinner) {
+      return NextResponse.json({ error: 'This member has already won an auction in this chit fund' }, { status: 400 });
     }
   }
 

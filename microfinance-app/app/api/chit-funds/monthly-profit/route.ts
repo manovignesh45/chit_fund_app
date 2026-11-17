@@ -16,10 +16,13 @@ export async function GET(request: NextRequest) {
       where: { createdById: currentUserId },
       select: {
         monthlyContribution: true, firstMonthContribution: true,
-        chitFundType: true, duration: true, currentMonth: true, status: true,
+        chitFundType: true, duration: true, currentMonth: true, status: true, totalAmount: true,
         fixedAmounts: { select: { month: true, amount: true } },
         contributions: { select: { amount: true, paidDate: true } },
-        auctions: { select: { amount: true, month: true, date: true } },
+        auctions: { select: { amount: true, month: true, date: true, winnerId: true } },
+        // The projection prices each member not yet paid out (booked month, else next free month).
+        members: { select: { id: true } },
+        auctionBookings: { select: { memberId: true, month: true } },
       },
     });
     return NextResponse.json(calculateChitCommissionTrends(funds, months));

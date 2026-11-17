@@ -3,13 +3,9 @@
  */
 
 import { Loan, Repayment, Contribution, Auction } from '@prisma/client';
-import { calculateChitPayoutCommission, CommissionFund } from './chitCommission';
+import { calculateChitPayoutCommission, CommissionFund, ChitProfitFund, getCountedChitAuctions } from './chitCommission';
 
-/** A chit fund as the "up to current month" profit helpers need it. */
-export type ChitProfitFund = CommissionFund & {
-  currentMonth?: number | null;
-  startDate?: string | Date | null;
-};
+export type { ChitProfitFund };
 
 /**
  * Calculate profit for a loan based on its type and repayments
@@ -117,28 +113,8 @@ export function calculateChitFundProfitUpToCurrentMonth(
   contributions: { amount: number; month?: number }[] = [],
   auctions: { amount: number; month?: number; date?: Date | string }[] = []
 ): number {
-  // Determine the current month
-  let currentMonth = chitFund.currentMonth || 1;
-
-  // If currentMonth is not provided, calculate it based on start date
-  if (!chitFund.currentMonth && chitFund.startDate) {
-    const start = typeof chitFund.startDate === 'string' ? new Date(chitFund.startDate) : chitFund.startDate;
-    const now = new Date();
-
-    if (start <= now) {
-      const diffYears = now.getFullYear() - start.getFullYear();
-      const diffMonths = now.getMonth() - start.getMonth();
-      let monthDiff = diffYears * 12 + diffMonths + 1;
-
-      if (now.getDate() < start.getDate()) {
-        monthDiff--;
-      }
-
-      currentMonth = Math.min(Math.max(1, monthDiff), chitFund.duration || 1);
-    }
-  }
-
-  const currentAuctions = auctions.filter(a => (!a.month || a.month <= currentMonth) && (!a.date || new Date(a.date) <= new Date()));
+  // The counted-auction filter is shared with calculateChitProfitReconciliation.
+  const currentAuctions = getCountedChitAuctions(chitFund, auctions);
   return calculateChitFundProfit(chitFund, contributions, currentAuctions);
 }
 
