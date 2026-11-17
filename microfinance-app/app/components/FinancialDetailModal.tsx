@@ -85,7 +85,7 @@ export default function FinancialDetailModal({ isOpen, onClose, periodData }: Fi
             ...(flow
               ? [
                   { label: 'Chit fund auctions', value: m(flow.auctionOutflow), sub: true },
-                  { label: 'Loan disbursements', value: m(flow.loanOutflow), sub: true },
+                  { label: 'Cash given to borrowers', value: m(flow.loanOutflow), sub: true },
                   { label: 'Net cash flow', value: m(flow.netCashFlow, 'auto'), total: true },
                 ]
               : []),

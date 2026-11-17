@@ -12,6 +12,9 @@
 import useSWR, { type SWRConfiguration } from 'swr';
 import { queryKeys, registerEndpoint, type QueryKey } from './keys';
 import { DUES, type DuesSummary } from './dues';
+import type { AmountFlowTally } from '../amountFlowTally';
+
+export type { AmountFlowTally, TallyRow, TallyLoanDetail, TallyUnmatchedDocumentCharge } from '../amountFlowTally';
 
 export const DASHBOARD = 'dashboard';
 export const TRENDS = 'trends';
@@ -191,6 +194,8 @@ export interface CalendarMonthResponse {
 export const dashboardKeys = {
   summary: (): QueryKey => queryKeys.action(DASHBOARD, 'summary'),
   balanceSummary: (): QueryKey => queryKeys.action(DASHBOARD, 'balance-summary'),
+  /** Records vs cash ledger, per category (`action=amount-flow-tally`). */
+  amountFlowTally: (): QueryKey => queryKeys.action(DASHBOARD, 'amount-flow-tally'),
   partnerBalances: (): QueryKey => queryKeys.action(PARTNERS, 'balances'),
   /** The Dues Tracker figures for the next 7 days (dashboard alert). */
   duesSoon: (): QueryKey => queryKeys.list(DUES, { horizonDays: 7 }),
@@ -214,6 +219,10 @@ export function useDashboardSummary(config?: SWRConfiguration<DashboardSummaryRe
 
 export function useBalanceSummary(enabled = true) {
   return useSWR<BalanceSummary>(enabled ? dashboardKeys.balanceSummary() : null);
+}
+
+export function useAmountFlowTally(enabled = true) {
+  return useSWR<AmountFlowTally>(enabled ? dashboardKeys.amountFlowTally() : null);
 }
 
 export function usePartnerBalances(enabled = true) {

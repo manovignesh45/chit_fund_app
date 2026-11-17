@@ -4,7 +4,7 @@
 import * as XLSX from 'xlsx';
 import prisma from './prisma';
 import { calculateTotalLoanProfit, calculateTotalChitFundProfitUpToCurrentMonth } from './financialUtils';
-import { calculatePeriodFinancialMetrics, createPeriodRange } from './centralizedFinancialCalculations';
+import { calculatePeriodFinancialMetrics, createPeriodRange, loanCashGiven } from './centralizedFinancialCalculations';
 
 // Helper function to format date consistently
 function formatDate(date: Date | string): string {
@@ -266,8 +266,9 @@ export async function getFinancialDataForExport(userId: number, startDate: Date,
   const totalCashInflow = contributions.reduce((sum, c) => sum + c.amount, 0) +
                          repayments.reduce((sum, r) => sum + r.amount, 0);
 
+  // Loans count the cash given (amount − document charge, which is kept back from the loan).
   const totalCashOutflow = auctions.reduce((sum, a) => sum + a.amount, 0) +
-                          loans.reduce((sum, l) => sum + l.amount, 0);
+                          loans.reduce((sum, l) => sum + loanCashGiven(l), 0);
 
   // Calculate profits using centralized utility functions
   const loanProfit = calculateTotalLoanProfit(loansWithRepayments);
@@ -355,7 +356,7 @@ export async function getFinancialDataForExport(userId: number, startDate: Date,
       chitFundProfit: chitFundProfit,
       outsideAmount: outsideAmount,
       loanCashInflow: repayments.reduce((sum, r) => sum + r.amount, 0),
-      loanCashOutflow: loans.reduce((sum, l) => sum + l.amount, 0),
+      loanCashOutflow: loans.reduce((sum, l) => sum + loanCashGiven(l), 0),
       documentCharges: periodMetrics.documentCharges,
       interestProfit: periodMetrics.interestPayments,
       numberOfLoans: loans.length,
@@ -416,7 +417,7 @@ export async function getFinancialDataForExport(userId: number, startDate: Date,
       );
 
       const periodCashInflow = periodContributions.reduce((sum, c) => sum + c.amount, 0) + periodRepayments.reduce((sum, r) => sum + r.amount, 0);
-      const periodCashOutflow = periodAuctions.reduce((sum, a) => sum + a.amount, 0) + periodLoans.reduce((sum, l) => sum + l.amount, 0);
+      const periodCashOutflow = periodAuctions.reduce((sum, a) => sum + a.amount, 0) + periodLoans.reduce((sum, l) => sum + loanCashGiven(l), 0);
       const periodLoanProfit = periodMetrics.loanProfit;
       const periodChitFundProfit = periodMetrics.chitFundProfit;
       const periodProfit = periodLoanProfit + periodChitFundProfit;
@@ -433,7 +434,7 @@ export async function getFinancialDataForExport(userId: number, startDate: Date,
           chitFundProfit: periodChitFundProfit,
           outsideAmount: periodOutsideAmount,
           loanCashInflow: periodRepayments.reduce((sum, r) => sum + r.amount, 0),
-          loanCashOutflow: periodLoans.reduce((sum, l) => sum + l.amount, 0),
+          loanCashOutflow: periodLoans.reduce((sum, l) => sum + loanCashGiven(l), 0),
           documentCharges: periodMetrics.documentCharges,
           interestProfit: periodMetrics.interestPayments,
           numberOfLoans: periodLoans.length,
