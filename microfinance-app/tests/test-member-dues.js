@@ -121,6 +121,8 @@ const fakeDb = {
     "../../../../lib/duesAccounts": duesAccounts,
     "../../../../lib/list/server": listServer,
     "../../../../lib/list/types": listTypes,
+    "../../../../lib/memberInsights": {}, // summary / timeline: tests/test-member-insights.js
+    "../../../../lib/memberTimeline": {},
   }, { URL });
   const get = (qs) => route.GET({ url: `http://x/api/members/consolidated?${qs}` });
 

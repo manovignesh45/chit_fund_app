@@ -7,6 +7,8 @@ import { computeChitMemberDuePeriods } from '../../../../lib/duesTracker';
 import { buildDueAccounts } from '../../../../lib/duesAccounts';
 import { parseListParams, type SortTarget } from '../../../../lib/list/server';
 import { buildMeta, MAX_PAGE_SIZE } from '../../../../lib/list/types';
+import { buildMemberSummary } from '../../../../lib/memberInsights';
+import { getMemberTimeline, parseTimelineQuery } from '../../../../lib/memberTimeline';
 
 // List-contract sort keys for the members list (stored columns, plus relation counts that
 // Postgres computes in the same query). Anything else in ?sort= is ignored.
@@ -106,6 +108,16 @@ export async function GET(request: NextRequest) {
           return NextResponse.json({ error: 'Member ID is required' }, { status: 400 });
         }
         return await getMemberPaymentHistory(request, id, currentUserId);
+      case 'summary':
+        if (!id) {
+          return NextResponse.json({ error: 'Member ID is required' }, { status: 400 });
+        }
+        return await getMemberSummary(id, currentUserId);
+      case 'timeline':
+        if (!id) {
+          return NextResponse.json({ error: 'Member ID is required' }, { status: 400 });
+        }
+        return await getMemberTimelineHandler(request, id, currentUserId);
       default:
         return NextResponse.json(
           { error: 'Invalid action' },
@@ -574,6 +586,76 @@ async function getMemberPaymentHistory(request: NextRequest, id: number, current
   } catch (error) {
     console.error('Error fetching member payment history:', error);
     return NextResponse.json({ error: 'Failed to fetch payment history' }, { status: 500 });
+  }
+}
+
+// Handler for a member's lifetime money, profit and per-account summary (lib/memberInsights.ts)
+async function getMemberSummary(id: number, currentUserId: number) {
+  try {
+    const owned = await findOwnedMember(id, currentUserId);
+    if (owned.error) return owned.error;
+
+    const member = await prisma.globalMember.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        createdAt: true,
+        chitFundMembers: {
+          where: { chitFund: { createdById: currentUserId } },
+          orderBy: [{ joinDate: 'asc' }, { id: 'asc' }],
+          select: {
+            id: true,
+            joinDate: true,
+            chitFund: {
+              select: {
+                id: true, name: true, status: true, totalAmount: true, monthlyContribution: true,
+                firstMonthContribution: true, membersCount: true, chitFundType: true,
+                currentMonth: true, startDate: true, duration: true,
+              },
+            },
+            contributions: { select: { amount: true, month: true, paidDate: true } },
+            auctions: { select: { id: true, month: true, date: true, amount: true } },
+          },
+        },
+        loans: {
+          where: { createdById: currentUserId },
+          orderBy: [{ disbursementDate: 'desc' }, { id: 'desc' }],
+          select: {
+            id: true, loanType: true, repaymentType: true, status: true, disbursementDate: true,
+            amount: true, interestRate: true, interestPercentage: true, documentCharge: true,
+            remainingAmount: true, nonRecoverableAt: true, nonRecoverableReason: true,
+            recoveryPrincipalAtMark: true, recoveryDuesAtMark: true, recoveryInterestOutstanding: true,
+            recoveryAmount: true, recoveryOutcome: true,
+            repayments: {
+              select: {
+                amount: true, paymentType: true, paidDate: true, period: true,
+                principalComponent: true, interestComponent: true,
+              },
+            },
+          },
+        },
+      },
+    });
+    if (!member) return NextResponse.json({ error: 'Member not found' }, { status: 404 });
+
+    return NextResponse.json(buildMemberSummary(member, member.chitFundMembers, member.loans, new Date()));
+  } catch (error) {
+    console.error('Error fetching member summary:', error);
+    return NextResponse.json({ error: 'Failed to fetch member summary' }, { status: 500 });
+  }
+}
+
+// Handler for a member's full event timeline, paged and totalled in the database (lib/memberTimeline.ts)
+async function getMemberTimelineHandler(request: NextRequest, id: number, currentUserId: number) {
+  try {
+    const owned = await findOwnedMember(id, currentUserId);
+    if (owned.error) return owned.error;
+
+    const { searchParams } = new URL(request.url);
+    return NextResponse.json(await getMemberTimeline(id, currentUserId, parseTimelineQuery(searchParams)));
+  } catch (error) {
+    console.error('Error fetching member timeline:', error);
+    return NextResponse.json({ error: 'Failed to fetch member timeline' }, { status: 500 });
   }
 }
 
