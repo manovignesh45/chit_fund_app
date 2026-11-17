@@ -17,6 +17,7 @@ import { invalidate, MONEY_TAGS } from './invalidate';
 import { queryKeys, registerEndpoint, type QueryKey, type QueryParams } from './keys';
 import type { Aggregations, AggregationMonth } from './dashboard';
 import { PARTNERS } from './dashboard';
+import { REPORTS } from './reports';
 import type { RecordAmountCategory, RecordAmountDirection } from '../recordAmountCategories';
 
 export const TRANSACTIONS = 'transactions';
@@ -135,12 +136,15 @@ export interface UnclassifiedEntry {
   note: string | null;
   /** Stored value: null, or one that does not fit the direction. */
   category: string | null;
-  /** Best guess from the note; the user confirms it. */
+  /** Best guess from the note; the user confirms it (null for a classified entry). */
   suggestedCategory: RecordAmountCategory | null;
+  /** Only in the `all` listing: true when the stored category is usable. */
+  classified?: boolean;
 }
 
 export interface UnclassifiedEntriesResponse {
   entries: UnclassifiedEntry[];
+  /** Entries without a usable category (also in the `all` listing). */
   count: number;
 }
 
@@ -162,6 +166,8 @@ export const transactionKeys = {
   pendingChits: (startDate: string, endDate: string): QueryKey =>
     queryKeys.action(TRANSACTIONS, 'pending-chits', null, { startDate, endDate }),
   unclassified: (): QueryKey => queryKeys.action(TRANSACTIONS, 'classify', null),
+  /** Every Record Amount entry that moves cash, classified ones too (to correct a category). */
+  recordAmountEntries: (): QueryKey => queryKeys.action(TRANSACTIONS, 'classify', null, { all: 1 }),
 };
 
 // ─────────────────────────────────────────────────────────────── reads
@@ -182,9 +188,14 @@ export function usePendingLoans(range: { startDate: string; endDate: string } | 
   return useSWR<{ pendingLoans: PendingLoan[] }>(range ? transactionKeys.pendingLoans(range.startDate, range.endDate) : null);
 }
 
-/** Record Amount entries that still need a category, with suggestions. */
-export function useUnclassifiedEntries(enabled = true) {
-  return useSWR<UnclassifiedEntriesResponse>(enabled ? transactionKeys.unclassified() : null);
+/**
+ * Record Amount entries that still need a category, with suggestions; with `includeClassified`,
+ * every entry (classified ones carry `classified: true`).
+ */
+export function useUnclassifiedEntries(enabled = true, includeClassified = false) {
+  return useSWR<UnclassifiedEntriesResponse>(
+    enabled ? (includeClassified ? transactionKeys.recordAmountEntries() : transactionKeys.unclassified()) : null
+  );
 }
 
 export function usePendingChits(range: { startDate: string; endDate: string } | null) {
@@ -208,14 +219,8 @@ export const transactionWrites = {
 // ─────────────────────────────────────────────────────────────── invalidation
 
 /**
- * Resource of the tax report queries (lib/query/reports.ts, next phase). A category change
- * moves amounts between report lines, so those queries refetch too.
- */
-export const REPORTS = 'reports';
-
-/**
  * After a category change: the transactions family (list badges, entries to classify) and
- * the reports. Balances do not change, so the dashboard and partner balances are left alone.
+ * the reports (a category moves amounts between report lines). Balances do not change, so the dashboard and partner balances are left alone.
  */
 export function invalidateTransactionCategories(): Promise<void> {
   return invalidate(TRANSACTIONS, REPORTS);

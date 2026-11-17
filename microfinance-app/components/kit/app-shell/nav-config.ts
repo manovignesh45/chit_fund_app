@@ -23,6 +23,7 @@ import {
   LayoutDashboard,
   MessageSquare,
   PiggyBank,
+  ReceiptText,
   Settings,
   TrendingUp,
   UserCog,
@@ -84,6 +85,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: 'transactions', label: 'Transactions', href: '/transactions', icon: ArrowLeftRight },
       { id: 'trends', label: 'Trends', href: '/financial-trends', icon: TrendingUp },
+      { id: 'tax-report', label: 'Tax report', href: '/reports/itr', icon: ReceiptText },
     ],
   },
   {
@@ -167,6 +169,8 @@ export const ROUTES: RouteDef[] = [
 
   { pattern: '/transactions', label: 'Transactions' },
   { pattern: '/financial-trends', label: 'Trends' },
+  // No /reports page: the tax report is a root of its own.
+  { pattern: '/reports/itr', label: 'Tax report', parent: null },
 
   { pattern: '/users', label: 'Users' },
   { pattern: '/partners', label: 'Partners' },

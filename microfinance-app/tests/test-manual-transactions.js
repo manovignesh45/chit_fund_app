@@ -403,8 +403,9 @@ let lockDatabase;
     "../../../../lib/auth": { getCurrentUserId: async () => classifyUser },
     "../../../../lib/transactionValidation": v,
     "../../../../lib/recordAmountCategories": cats,
-  });
+  }, { URL });
   const listUnclassified = () => classifyRoute.GET({ url: "http://x/api/transactions/classify" });
+  const listAll = () => classifyRoute.GET({ url: "http://x/api/transactions/classify?all=1" });
   const patch = (body) => classifyRoute.PATCH({ json: async () => body });
 
   res = await listUnclassified();
@@ -467,6 +468,21 @@ let lockDatabase;
   assert.equal(rows.find((x) => x.id === 7).category, null, "another account's entry is untouched");
   res = await listUnclassified();
   assert.equal(JSON.stringify(res.body.entries.map((e) => e.id)), "[8]");
+  assert.equal(res.body.entries[0].classified, undefined, "the default listing is unchanged");
+
+  // ?all=1: every own entry that moves cash, classified ones too, so a category can be corrected.
+  res = await listAll();
+  assert.equal(res.status, 200);
+  assert.equal(JSON.stringify(res.body.entries.map((e) => [e.id, e.classified])), JSON.stringify([[3, true], [4, true], [5, true], [6, true], [8, false]]));
+  assert.equal(res.body.count, 1, "count still counts the unclassified");
+  assert.equal(res.body.entries.find((e) => e.id === 6).category, "EXPENSE");
+  assert.equal(res.body.entries.find((e) => e.id === 6).suggestedCategory, null, "no suggestion for a classified entry");
+  assert.equal(res.body.entries.find((e) => e.id === 8).suggestedCategory, null);
+  assert.equal((await patch({ items: [{ id: 6, category: "DRAWINGS" }] })).status, 200, "a classified entry is corrected through the same PATCH");
+  assert.equal(rows.find((x) => x.id === 6).category, "DRAWINGS");
+  classifyUser = null;
+  assert.equal((await listAll()).status, 401);
+  classifyUser = 7;
 
   console.log("PASS: POST /api/transactions enforces reasons, categories, partner ownership, duplicate guard and balances; notification details endpoint.");
   console.log("PASS: /api/transactions/classify lists unclassified entries with suggestions and sets categories (owner-scoped, direction-checked, all or none, balances untouched).");

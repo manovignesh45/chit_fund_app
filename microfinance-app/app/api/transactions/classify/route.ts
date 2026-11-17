@@ -10,6 +10,8 @@ import { categoryAllowsDirection, isRecordAmountCategory, suggestRecordAmountCat
  * GET   /api/transactions/classify → the data owner's RECORD_AMOUNT entries that have no usable
  *       category (null, unknown, or not allowed for the entry's direction), oldest first, each
  *       with a suggestion from its note. Nothing is saved.
+ *       `?all=1` lists every entry that moves cash, classified ones too (`classified: true`, no
+ *       suggestion), so a category can be corrected; `count` still counts the unclassified.
  * PATCH /api/transactions/classify  { items: [{ id, category }] } → sets the category of those
  *       entries, all or none. Only the category changes: amount, date, partners and the stored
  *       running balances stay as they are, and no notification is sent.
@@ -24,6 +26,7 @@ export async function GET(request: NextRequest) {
     if (!currentUserId) {
       return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
     }
+    const all = ['1', 'true'].includes(new URL(request.url).searchParams.get('all') ?? '');
 
     // Record Amount entries are few (manual only), so read them all and apply the same
     // "usable category" rule as the tax report in code.
@@ -45,10 +48,13 @@ export async function GET(request: NextRequest) {
       },
     });
 
+    let count = 0;
     const entries = rows.flatMap((row) => {
       const direction = recordAmountDirection(row.from_partner_id, row.to_partner_id);
       if (!direction) return []; // no partner: the entry moves no cash, nothing to report
-      if (isRecordAmountCategory(row.category) && categoryAllowsDirection(row.category, direction)) return [];
+      const classified = isRecordAmountCategory(row.category) && categoryAllowsDirection(row.category, direction);
+      if (!classified) count++;
+      if (classified && !all) return [];
       const partnerName = direction === 'credit'
         ? row.toPartner?.name ?? row.to_partner ?? null
         : row.fromPartner?.name ?? row.from_partner ?? null;
@@ -60,11 +66,12 @@ export async function GET(request: NextRequest) {
         partnerName,
         note: row.note,
         category: row.category,
-        suggestedCategory: suggestRecordAmountCategory(row.note, direction),
+        suggestedCategory: classified ? null : suggestRecordAmountCategory(row.note, direction),
+        ...(all ? { classified } : {}),
       }];
     });
 
-    return NextResponse.json({ entries, count: entries.length });
+    return NextResponse.json({ entries, count });
   } catch (error) {
     console.error('Error fetching entries to classify:', error);
     return NextResponse.json({ error: 'Failed to load entries to classify' }, { status: 500 });

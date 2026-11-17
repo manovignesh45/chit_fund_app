@@ -7,6 +7,9 @@
  * or confirms "Confirm all suggested". A saved entry leaves the list. Category changes
  * never touch amounts or balances (PATCH /api/transactions/classify).
  *
+ * "Show classified entries" lists the entries that already have a category too, so a wrong
+ * category can be corrected (same save, same direction rule).
+ *
  * Embedded by the tax report page; `onChanged` runs after every successful save.
  */
 import * as React from 'react';
@@ -26,7 +29,9 @@ import { categoryAllowsDirection, isRecordAmountCategory, RECORD_AMOUNT_CATEGORI
 import { recordAmountCategoriesFor, recordAmountCategoryLabel } from '@/lib/transactionValidation';
 
 import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Switch } from '@/components/ui/switch';
 import { ConfirmDialog } from '@/components/kit/confirm-dialog';
 import { DateText } from '@/components/kit/date-text';
 import { EmptyState } from '@/components/kit/empty-state';
@@ -45,8 +50,12 @@ export interface ClassifyEntriesPanelProps {
 const hintOf = (value: string) => RECORD_AMOUNT_CATEGORIES.find((c) => c.value === value)?.hint ?? '';
 
 export default function ClassifyEntriesPanel({ onChanged, className }: ClassifyEntriesPanelProps) {
-  const query = useUnclassifiedEntries();
+  const [showClassified, setShowClassified] = React.useState(false);
+  const query = useUnclassifiedEntries(true, showClassified);
   const entries = query.data?.entries ?? [];
+  const toClassify = entries.filter((e) => !e.classified);
+  const classified = entries.filter((e) => e.classified);
+  const unclassifiedCount = query.data?.count ?? 0;
 
   // The user's pick per entry id; absent means "still the suggestion".
   const [choices, setChoices] = React.useState<Record<number, string>>({});
@@ -54,9 +63,9 @@ export default function ClassifyEntriesPanel({ onChanged, className }: ClassifyE
   const [rowErrors, setRowErrors] = React.useState<Record<number, string>>({});
   const [confirmAllOpen, setConfirmAllOpen] = React.useState(false);
 
-  const choiceOf = (e: UnclassifiedEntry) => choices[e.id] ?? e.suggestedCategory ?? '';
+  const choiceOf = (e: UnclassifiedEntry) => choices[e.id] ?? (e.classified ? e.category : e.suggestedCategory) ?? '';
   const anySaving = Object.values(saving).some(Boolean);
-  const suggested = entries.filter((e) => e.suggestedCategory && choiceOf(e) === e.suggestedCategory);
+  const suggested = toClassify.filter((e) => e.suggestedCategory && choiceOf(e) === e.suggestedCategory);
 
   const save = async (items: CategoryUpdate[]) => {
     const ids = new Set(items.map((i) => i.id));
@@ -74,10 +83,18 @@ export default function ClassifyEntriesPanel({ onChanged, className }: ClassifyE
     });
     try {
       await transactionWrites.setCategories(items);
-      // Saved rows leave the list now; the refetch below confirms it.
+      // Saved rows leave the "to classify" list now (or show their new category when classified
+      // entries are listed); the refetch below confirms it.
+      const saved = new Map(items.map((i) => [i.id, i.category]));
       await query.mutate(
-        (current: UnclassifiedEntriesResponse | undefined) =>
-          current ? { entries: current.entries.filter((e) => !ids.has(e.id)), count: Math.max(0, current.count - ids.size) } : current,
+        (current: UnclassifiedEntriesResponse | undefined) => {
+          if (!current) return current;
+          const newlyClassified = current.entries.filter((e) => ids.has(e.id) && !e.classified).length;
+          const entries = showClassified
+            ? current.entries.map((e) => (saved.has(e.id) ? { ...e, category: saved.get(e.id)!, suggestedCategory: null, classified: true } : e))
+            : current.entries.filter((e) => !ids.has(e.id));
+          return { entries, count: Math.max(0, current.count - newlyClassified) };
+        },
         { revalidate: false }
       );
       setChoices((prev) => {
@@ -136,37 +153,63 @@ export default function ClassifyEntriesPanel({ onChanged, className }: ClassifyE
         ))}
       </div>
     );
-  } else if (entries.length === 0) {
-    body = (
-      <EmptyState
-        compact
-        icon={CheckCircle2}
-        title="Every entry is classified"
-        description="New Record Amount entries get their category when they are recorded."
+  } else {
+    const row = (e: UnclassifiedEntry) => (
+      <EntryRow
+        key={e.id}
+        entry={e}
+        choice={choiceOf(e)}
+        onChoice={(value) => {
+          setChoices((prev) => ({ ...prev, [e.id]: value }));
+          setRowErrors((prev) => {
+            const next = { ...prev };
+            delete next[e.id];
+            return next;
+          });
+        }}
+        onSave={() => saveRow(e)}
+        saving={!!saving[e.id]}
+        error={rowErrors[e.id]}
       />
     );
-  } else {
     body = (
-      <ul className="divide-y" aria-label="Entries to classify">
-        {entries.map((e) => (
-          <EntryRow
-            key={e.id}
-            entry={e}
-            choice={choiceOf(e)}
-            onChoice={(value) => {
-              setChoices((prev) => ({ ...prev, [e.id]: value }));
-              setRowErrors((prev) => {
-                const next = { ...prev };
-                delete next[e.id];
-                return next;
-              });
-            }}
-            onSave={() => saveRow(e)}
-            saving={!!saving[e.id]}
-            error={rowErrors[e.id]}
+      <>
+        {toClassify.length === 0 ? (
+          <EmptyState
+            compact
+            icon={CheckCircle2}
+            title="Every entry is classified"
+            description={
+              showClassified
+                ? 'Change a category below if it is wrong.'
+                : 'New Record Amount entries get their category when they are recorded. Turn on “Show classified entries” to change one.'
+            }
           />
-        ))}
-      </ul>
+        ) : (
+          <ul className="divide-y" aria-label="Entries to classify">
+            {toClassify.map(row)}
+          </ul>
+        )}
+        {showClassified ? (
+          <div className="border-t">
+            <h3 className="bg-elevated px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground sm:px-6">
+              Classified entries ({classified.length})
+            </h3>
+            {query.isLoading ? (
+              <div className="space-y-2 border-t px-4 py-4 sm:px-6" role="status" aria-label="Loading classified entries">
+                <Skeleton className="h-4 w-1/2" />
+                <Skeleton className="h-10 w-full" />
+              </div>
+            ) : classified.length ? (
+              <ul className="divide-y border-t" aria-label="Classified entries">
+                {classified.map(row)}
+              </ul>
+            ) : (
+              <p className="border-t px-4 py-4 text-sm text-muted-foreground sm:px-6">No classified entries yet.</p>
+            )}
+          </div>
+        ) : null}
+      </>
     );
   }
 
@@ -174,7 +217,7 @@ export default function ClassifyEntriesPanel({ onChanged, className }: ClassifyE
     <SectionCard
       className={className}
       flush
-      title={`Entries to classify${entries.length ? ` (${entries.length})` : ''}`}
+      title={`Entries to classify${unclassifiedCount ? ` (${unclassifiedCount})` : ''}`}
       description="Record Amount entries without a category are kept out of the profit & loss. Check each suggestion, change it if needed, and save."
       actions={
         suggested.length > 0 ? (
@@ -184,6 +227,12 @@ export default function ClassifyEntriesPanel({ onChanged, className }: ClassifyE
         ) : null
       }
     >
+      <div className="flex items-center gap-2 border-b px-4 py-2.5 sm:px-6">
+        <Switch id="classify-show-classified" checked={showClassified} onCheckedChange={setShowClassified} disabled={anySaving} />
+        <Label htmlFor="classify-show-classified" className="text-sm font-normal">
+          Show classified entries (to change a category)
+        </Label>
+      </div>
       {body}
       <ConfirmDialog
         open={confirmAllOpen}
@@ -223,7 +272,9 @@ function EntryRow({
   error?: string;
 }) {
   const credit = e.direction === 'credit';
-  const isSuggestion = !!e.suggestedCategory && choice === e.suggestedCategory;
+  const isSuggestion = !e.classified && !!e.suggestedCategory && choice === e.suggestedCategory;
+  // A classified entry is saved only when its category is changed.
+  const unchanged = !!e.classified && choice === e.category;
   const misfit = e.category && !(isRecordAmountCategory(e.category) && categoryAllowsDirection(e.category, e.direction));
   const selectId = `classify-${e.id}`;
 
@@ -236,6 +287,9 @@ function EntryRow({
             <span className="text-muted-foreground"> · {e.partnerName || '—'}</span>
           </p>
           <p className="break-words text-sm text-muted-foreground">{e.note || <span className="italic">No reason recorded</span>}</p>
+          {e.classified ? (
+            <p className="text-xs text-muted-foreground">Saved as “{recordAmountCategoryLabel(e.category)}”.</p>
+          ) : null}
           {misfit ? (
             <p className="text-xs text-warning-text">
               Saved as “{recordAmountCategoryLabel(e.category)}”, which cannot be a {e.direction}.
@@ -274,9 +328,9 @@ function EntryRow({
             options={recordAmountCategoriesFor(e.direction).map((c) => ({ value: c.value, label: c.label }))}
           />
         </FormField>
-        <Button className="w-full sm:mt-7 sm:w-auto" onClick={onSave} disabled={saving || !choice}>
+        <Button className="w-full sm:mt-7 sm:w-auto" variant={e.classified ? 'outline' : 'default'} onClick={onSave} disabled={saving || !choice || unchanged}>
           {saving ? <Loader2 aria-hidden="true" className="motion-safe:animate-spin" /> : null}
-          {saving ? 'Saving…' : isSuggestion ? 'Confirm' : 'Save'}
+          {saving ? 'Saving…' : isSuggestion ? 'Confirm' : e.classified ? 'Change' : 'Save'}
           <span className="sr-only"> category for entry #{e.id}</span>
         </Button>
       </div>
