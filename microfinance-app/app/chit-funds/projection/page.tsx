@@ -3,7 +3,7 @@
 /**
  * Auction Plan: the consolidated cash-flow projection (Report template). KPI strip, the
  * "simulate a new member" controls, a cumulative-balance chart, and the month table with
- * booked winners per month. Every figure is the server's (/api/projection/consolidated);
+ * booked winners per month (one card per month on phones). Every figure is the server's (/api/projection/consolidated);
  * the page only sums the booked-but-unpaid payouts for the KPI strip, as before.
  * While a simulation loads, the previous figures stay on screen, dimmed.
  */
@@ -361,7 +361,7 @@ function Projection() {
                     )}
                   </p>
                 ) : null}
-                <p className="border-b px-4 py-2 text-xs text-muted-foreground">Click a calendar month to see booked auction winners.</p>
+                <p className="border-b px-4 py-2 text-xs text-muted-foreground">Select a calendar month to see booked auction winners.</p>
                 <ProjectionTable
                   rows={displayRows}
                   baseline={projection}
@@ -383,6 +383,51 @@ function Projection() {
   );
 }
 
+/** Figures one calendar month shows, in the table (md+) and in the phone cards alike. */
+function monthInfo(row: ProjectionRow, idx: number, baseline: ProjectionRow[], compareMode: boolean, now: Date) {
+  const base = baseline[idx];
+  const isCurrent = row.year === now.getFullYear() && row.month === now.getMonth() + 1;
+  const isPastMonth = !!row.isPastMonth;
+  const booked = row.bookedMembers ?? [];
+  const rowKey = `${row.year}-${row.month}`;
+  return {
+    base,
+    cumDiff: compareMode && base ? row.cumulativeBalance - base.cumulativeBalance : 0,
+    isCurrent,
+    isPastMonth,
+    booked,
+    rowKey,
+    detailsId: `projection-month-${rowKey}`,
+    pendingAmount: isCurrent || isPastMonth ? booked.filter((b) => !b.isActual).reduce((sum, b) => sum + b.payoutAmount, 0) : 0,
+  };
+}
+
+function MonthTags({ isCurrent, isPastMonth, bookedCount }: { isCurrent: boolean; isPastMonth: boolean; bookedCount: number }) {
+  return (
+    <>
+      {isCurrent ? <span className="text-xs font-normal text-primary-text">(current)</span> : null}
+      {isPastMonth ? <span className="text-xs font-normal text-muted-foreground">(last month)</span> : null}
+      {bookedCount > 0 ? <span className="text-xs font-normal text-muted-foreground">({bookedCount} booked)</span> : null}
+    </>
+  );
+}
+
+function CumulativeNotes({ isPastMonth, estimated, cumDiff }: { isPastMonth: boolean; estimated?: boolean; cumDiff: number }) {
+  return (
+    <>
+      {isPastMonth ? <span className="block text-xs font-normal text-muted-foreground">{estimated ? '(estimated)' : '(actual)'}</span> : null}
+      {cumDiff !== 0 ? (
+        <span className={cn('block text-xs font-normal', cumDiff >= 0 ? 'text-success-text' : 'text-destructive-text')}>
+          {cumDiff >= 0 ? '+' : ''}
+          {formatMoney(cumDiff)} vs baseline
+        </span>
+      ) : null}
+    </>
+  );
+}
+
+const dash = <span className="text-muted-foreground">—</span>;
+
 function ProjectionTable({
   rows,
   baseline,
@@ -401,110 +446,179 @@ function ProjectionTable({
   const colSpan = compareMode ? 8 : 7;
   const th = 'px-3 py-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground';
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[960px] text-sm">
-        <thead className="border-b bg-elevated">
-          <tr>
-            <th scope="col" className={cn(th, 'sticky left-0 z-10 bg-elevated text-left')}>
-              Calendar month
-            </th>
-            <th scope="col" className={cn(th, 'text-right')}>Loan repayments</th>
-            <th scope="col" className={cn(th, 'text-right')}>Chit contributions</th>
-            <th scope="col" className={cn(th, 'text-right')}>Total collection</th>
-            <th scope="col" className={cn(th, 'text-right')}>
-              Auction payout
-              <span className="block text-[10px] font-normal normal-case">(projected)</span>
-            </th>
-            <th scope="col" className={cn(th, 'text-right')}>
-              Net
-              <span className="block text-[10px] font-normal normal-case">(projected)</span>
-            </th>
-            <th scope="col" className={cn(th, 'text-right')}>{compareMode ? 'Sim. cumulative' : 'Cumulative balance'}</th>
-            {compareMode ? <th scope="col" className={cn(th, 'text-right')}>Baseline cumulative</th> : null}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, idx) => {
-            const base = baseline[idx];
-            const cumDiff = compareMode && base ? row.cumulativeBalance - base.cumulativeBalance : 0;
-            const isCurrent = row.year === now.getFullYear() && row.month === now.getMonth() + 1;
-            const isPastMonth = !!row.isPastMonth;
-            const rowKey = `${row.year}-${row.month}`;
-            const isExpanded = expandedKey === rowKey;
-            const booked = row.bookedMembers ?? [];
-            const pendingAmount = isCurrent || isPastMonth ? booked.filter((b) => !b.isActual).reduce((sum, b) => sum + b.payoutAmount, 0) : 0;
-            const detailsId = `projection-month-${rowKey}`;
-            return (
-              <React.Fragment key={rowKey}>
-                <tr
-                  onClick={() => onToggle(rowKey)}
-                  className={cn('cursor-pointer border-b transition-colors hover:bg-accent/60', isCurrent && 'bg-primary-subtle/60', isExpanded && 'bg-accent/60')}
-                >
-                  <td className={cn('sticky left-0 z-10 whitespace-nowrap bg-card px-3 py-3 font-medium', isCurrent && 'bg-primary-subtle')}>
-                    <button
-                      type="button"
-                      aria-expanded={isExpanded}
-                      aria-controls={isExpanded ? detailsId : undefined}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onToggle(rowKey);
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      <ChevronRight aria-hidden="true" className={cn('h-4 w-4 text-muted-foreground transition-transform', isExpanded && 'rotate-90')} />
-                      {row.label}
-                      {isCurrent ? <span className="text-xs font-normal text-primary-text">(current)</span> : null}
-                      {isPastMonth ? <span className="text-xs font-normal text-muted-foreground">(last month)</span> : null}
-                      {booked.length > 0 ? <span className="text-xs font-normal text-muted-foreground">({booked.length} booked)</span> : null}
-                    </button>
-                  </td>
-                  <td className="px-3 py-3 text-right">
-                    {row.expectedLoanRepayments > 0 ? <Money value={row.expectedLoanRepayments} tone="plain" /> : <span className="text-muted-foreground">—</span>}
-                  </td>
-                  <td className="px-3 py-3 text-right">
-                    {row.expectedChitContributions > 0 ? <Money value={row.expectedChitContributions} tone="plain" /> : <span className="text-muted-foreground">—</span>}
-                  </td>
-                  <td className="px-3 py-3 text-right font-medium">
-                    <Money value={row.totalExpectedCollection} tone="plain" />
-                  </td>
-                  <td className="px-3 py-3 text-right">
-                    {row.totalAuctionPayout > 0 ? <Money value={row.totalAuctionPayout} tone="outflow" /> : <span className="text-muted-foreground">—</span>}
-                    {(isCurrent || isPastMonth) && pendingAmount > 0 ? (
-                      <span className="block text-xs text-muted-foreground">({formatMoney(pendingAmount)} pending)</span>
-                    ) : null}
-                  </td>
-                  <td className={cn('px-3 py-3 text-right font-medium', row.net > 0 ? 'text-success-text' : row.net < 0 ? 'text-destructive-text' : '')}>
-                    <Money value={row.net} tone="plain" />
-                  </td>
-                  <td className={cn('px-3 py-3 text-right font-semibold', row.cumulativeBalance >= 0 ? 'text-success-text' : 'text-destructive-text')}>
+    <>
+      {/* Phones: one card per calendar month; tap to see the booked winners. */}
+      <ul aria-label="Projection by calendar month" className="space-y-2 p-3 md:hidden">
+        {rows.map((row, idx) => {
+          const m = monthInfo(row, idx, baseline, compareMode, now);
+          const isExpanded = expandedKey === m.rowKey;
+          return (
+            <li
+              key={m.rowKey}
+              className={cn('rounded-xl border bg-card text-card-foreground', m.isCurrent && 'border-primary/40 bg-primary-subtle/40', isExpanded && 'bg-accent/40')}
+            >
+              <button
+                type="button"
+                aria-expanded={isExpanded}
+                aria-controls={isExpanded ? m.detailsId : undefined}
+                onClick={() => onToggle(m.rowKey)}
+                className="w-full rounded-xl p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 font-medium text-foreground">
+                    <ChevronRight aria-hidden="true" className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', isExpanded && 'rotate-90')} />
+                    {row.label}
+                    <MonthTags isCurrent={m.isCurrent} isPastMonth={m.isPastMonth} bookedCount={m.booked.length} />
+                  </div>
+                  <div className={cn('shrink-0 text-right font-semibold', row.cumulativeBalance >= 0 ? 'text-success-text' : 'text-destructive-text')}>
                     <Money value={row.cumulativeBalance} tone="plain" />
-                    {isPastMonth ? (
-                      <span className="block text-xs font-normal text-muted-foreground">{row.isPastBalanceEstimated ? '(estimated)' : '(actual)'}</span>
-                    ) : null}
-                    {compareMode && cumDiff !== 0 ? (
-                      <span className={cn('block text-xs font-normal', cumDiff >= 0 ? 'text-success-text' : 'text-destructive-text')}>
-                        {cumDiff >= 0 ? '+' : ''}
-                        {formatMoney(cumDiff)} vs baseline
-                      </span>
-                    ) : null}
-                  </td>
-                  {compareMode ? (
-                    <td className="px-3 py-3 text-right text-muted-foreground">{base ? formatMoney(base.cumulativeBalance) : '—'}</td>
-                  ) : null}
-                </tr>
-                {isExpanded ? (
-                  <tr id={detailsId} className="border-b bg-elevated">
-                    <td colSpan={colSpan} className="px-4 py-4 sm:px-6">
-                      <BookedWinners row={row} showStatus={isCurrent || isPastMonth} />
+                    <span className="block text-[11px] font-normal text-muted-foreground">{compareMode ? 'Sim. cumulative' : 'Cumulative'}</span>
+                  </div>
+                </div>
+                <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                  <div>
+                    <dt className="text-xs text-muted-foreground">Total collection</dt>
+                    <dd className="font-medium">
+                      <Money value={row.totalExpectedCollection} tone="plain" />
+                    </dd>
+                  </div>
+                  <div className="text-right">
+                    <dt className="text-xs text-muted-foreground">Auction payout</dt>
+                    <dd>
+                      {row.totalAuctionPayout > 0 ? <Money value={row.totalAuctionPayout} tone="outflow" /> : dash}
+                      {m.pendingAmount > 0 ? <span className="block text-xs text-muted-foreground">({formatMoney(m.pendingAmount)} pending)</span> : null}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">Loan repayments</dt>
+                    <dd>{row.expectedLoanRepayments > 0 ? <Money value={row.expectedLoanRepayments} tone="plain" /> : dash}</dd>
+                  </div>
+                  <div className="text-right">
+                    <dt className="text-xs text-muted-foreground">Chit contributions</dt>
+                    <dd>{row.expectedChitContributions > 0 ? <Money value={row.expectedChitContributions} tone="plain" /> : dash}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-muted-foreground">Net</dt>
+                    <dd className={cn('font-medium', row.net > 0 ? 'text-success-text' : row.net < 0 ? 'text-destructive-text' : '')}>
+                      <Money value={row.net} tone="plain" />
+                    </dd>
+                  </div>
+                  <div className="text-right">
+                    {compareMode ? (
+                      <>
+                        <dt className="text-xs text-muted-foreground">Baseline cumulative</dt>
+                        <dd>
+                          {m.base ? <span className="text-muted-foreground">{formatMoney(m.base.cumulativeBalance)}</span> : dash}
+                          <CumulativeNotes isPastMonth={m.isPastMonth} estimated={row.isPastBalanceEstimated} cumDiff={m.cumDiff} />
+                        </dd>
+                      </>
+                    ) : (
+                      <>
+                        <dt className="text-xs text-muted-foreground">Balance is</dt>
+                        <dd>{m.isPastMonth ? (row.isPastBalanceEstimated ? 'Estimated' : 'Actual') : 'Projected'}</dd>
+                      </>
+                    )}
+                  </div>
+                </dl>
+              </button>
+              {isExpanded ? (
+                <div id={m.detailsId} className="border-t px-3 pb-3 pt-3">
+                  <BookedWinners row={row} showStatus={m.isCurrent || m.isPastMonth} />
+                </div>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+
+      <div className="hidden overflow-x-auto md:block">
+        <table className="w-full min-w-[960px] text-sm">
+          <thead className="border-b bg-elevated">
+            <tr>
+              <th scope="col" className={cn(th, 'sticky left-0 z-10 bg-elevated text-left')}>
+                Calendar month
+              </th>
+              <th scope="col" className={cn(th, 'text-right')}>Loan repayments</th>
+              <th scope="col" className={cn(th, 'text-right')}>Chit contributions</th>
+              <th scope="col" className={cn(th, 'text-right')}>Total collection</th>
+              <th scope="col" className={cn(th, 'text-right')}>
+                Auction payout
+                <span className="block text-[10px] font-normal normal-case">(projected)</span>
+              </th>
+              <th scope="col" className={cn(th, 'text-right')}>
+                Net
+                <span className="block text-[10px] font-normal normal-case">(projected)</span>
+              </th>
+              <th scope="col" className={cn(th, 'text-right')}>{compareMode ? 'Sim. cumulative' : 'Cumulative balance'}</th>
+              {compareMode ? <th scope="col" className={cn(th, 'text-right')}>Baseline cumulative</th> : null}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, idx) => {
+              const m = monthInfo(row, idx, baseline, compareMode, now);
+              const isExpanded = expandedKey === m.rowKey;
+              return (
+                <React.Fragment key={m.rowKey}>
+                  <tr
+                    onClick={() => onToggle(m.rowKey)}
+                    className={cn('cursor-pointer border-b transition-colors hover:bg-accent/60', m.isCurrent && 'bg-primary-subtle/60', isExpanded && 'bg-accent/60')}
+                  >
+                    <td className={cn('sticky left-0 z-10 whitespace-nowrap bg-card px-3 py-3 font-medium', m.isCurrent && 'bg-primary-subtle')}>
+                      <button
+                        type="button"
+                        aria-expanded={isExpanded}
+                        aria-controls={isExpanded ? `${m.detailsId}-row` : undefined}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onToggle(m.rowKey);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <ChevronRight aria-hidden="true" className={cn('h-4 w-4 text-muted-foreground transition-transform', isExpanded && 'rotate-90')} />
+                        {row.label}
+                        <MonthTags isCurrent={m.isCurrent} isPastMonth={m.isPastMonth} bookedCount={m.booked.length} />
+                      </button>
                     </td>
+                    <td className="px-3 py-3 text-right">
+                      {row.expectedLoanRepayments > 0 ? <Money value={row.expectedLoanRepayments} tone="plain" /> : dash}
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {row.expectedChitContributions > 0 ? <Money value={row.expectedChitContributions} tone="plain" /> : dash}
+                    </td>
+                    <td className="px-3 py-3 text-right font-medium">
+                      <Money value={row.totalExpectedCollection} tone="plain" />
+                    </td>
+                    <td className="px-3 py-3 text-right">
+                      {row.totalAuctionPayout > 0 ? <Money value={row.totalAuctionPayout} tone="outflow" /> : dash}
+                      {m.pendingAmount > 0 ? <span className="block text-xs text-muted-foreground">({formatMoney(m.pendingAmount)} pending)</span> : null}
+                    </td>
+                    <td className={cn('px-3 py-3 text-right font-medium', row.net > 0 ? 'text-success-text' : row.net < 0 ? 'text-destructive-text' : '')}>
+                      <Money value={row.net} tone="plain" />
+                    </td>
+                    <td className={cn('px-3 py-3 text-right font-semibold', row.cumulativeBalance >= 0 ? 'text-success-text' : 'text-destructive-text')}>
+                      <Money value={row.cumulativeBalance} tone="plain" />
+                      <CumulativeNotes isPastMonth={m.isPastMonth} estimated={row.isPastBalanceEstimated} cumDiff={m.cumDiff} />
+                    </td>
+                    {compareMode ? (
+                      <td className="px-3 py-3 text-right text-muted-foreground">{m.base ? formatMoney(m.base.cumulativeBalance) : '—'}</td>
+                    ) : null}
                   </tr>
-                ) : null}
-              </React.Fragment>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+                  {isExpanded ? (
+                    <tr id={`${m.detailsId}-row`} className="border-b bg-elevated">
+                      <td colSpan={colSpan} className="px-4 py-4 sm:px-6">
+                        <div className="max-w-3xl rounded-lg border bg-card p-4">
+                          <BookedWinners row={row} showStatus={m.isCurrent || m.isPastMonth} />
+                        </div>
+                      </td>
+                    </tr>
+                  ) : null}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }
 
@@ -522,37 +636,57 @@ function BookedWinners({ row, showStatus }: { row: ProjectionRow; showStatus: bo
     : `Booked auction winners — ${row.label}`;
   const emptyText = showStatus ? 'No auction winners recorded or booked for this month.' : 'No members booked for this month.';
   return (
-    <div className="max-w-3xl rounded-lg border bg-card p-4">
+    <div>
       <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{heading}</p>
       {sorted.length > 0 ? (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs text-muted-foreground">
-                <th scope="col" className="pb-2 pr-4 font-medium">Chit fund</th>
-                <th scope="col" className="pb-2 pr-4 font-medium">Member</th>
-                <th scope="col" className="pb-2 pr-4 font-medium">Fund month</th>
-                {showStatus ? <th scope="col" className="pb-2 pr-4 font-medium">Status</th> : null}
-                <th scope="col" className="pb-2 text-right font-medium">Payout</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y">
-              {sorted.map((b, i) => (
-                <tr key={`${b.fundId}-${b.memberName}-${i}`}>
-                  <td className="py-2 pr-4">{b.fundName}</td>
-                  <td className="py-2 pr-4 font-medium">{b.memberName}</td>
-                  <td className="py-2 pr-4 text-muted-foreground">Month {b.fundMonth}</td>
+        <>
+          <ul className="divide-y md:hidden">
+            {sorted.map((b, i) => (
+              <li key={`${b.fundId}-${b.memberName}-${i}`} className="flex items-start justify-between gap-3 py-2 text-sm">
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-foreground">{b.memberName}</p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {b.fundName} · Month {b.fundMonth}
+                  </p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <Money value={b.payoutAmount} tone="outflow" />
                   {showStatus ? (
-                    <td className="py-2 pr-4">{b.isActual ? <StatusBadge status="Paid" /> : <StatusBadge status="Upcoming" label="Booked" />}</td>
+                    <div className="mt-1">{b.isActual ? <StatusBadge status="Paid" /> : <StatusBadge status="Upcoming" label="Booked" />}</div>
                   ) : null}
-                  <td className="py-2 text-right">
-                    <Money value={b.payoutAmount} tone="outflow" />
-                  </td>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <div className="hidden overflow-x-auto md:block">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-muted-foreground">
+                  <th scope="col" className="pb-2 pr-4 font-medium">Chit fund</th>
+                  <th scope="col" className="pb-2 pr-4 font-medium">Member</th>
+                  <th scope="col" className="pb-2 pr-4 font-medium">Fund month</th>
+                  {showStatus ? <th scope="col" className="pb-2 pr-4 font-medium">Status</th> : null}
+                  <th scope="col" className="pb-2 text-right font-medium">Payout</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody className="divide-y">
+                {sorted.map((b, i) => (
+                  <tr key={`${b.fundId}-${b.memberName}-${i}`}>
+                    <td className="py-2 pr-4">{b.fundName}</td>
+                    <td className="py-2 pr-4 font-medium">{b.memberName}</td>
+                    <td className="py-2 pr-4 text-muted-foreground">Month {b.fundMonth}</td>
+                    {showStatus ? (
+                      <td className="py-2 pr-4">{b.isActual ? <StatusBadge status="Paid" /> : <StatusBadge status="Upcoming" label="Booked" />}</td>
+                    ) : null}
+                    <td className="py-2 text-right">
+                      <Money value={b.payoutAmount} tone="outflow" />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       ) : (
         <p className="text-sm italic text-muted-foreground">{emptyText}</p>
       )}

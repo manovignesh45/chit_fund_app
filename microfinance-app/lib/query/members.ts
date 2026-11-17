@@ -3,6 +3,7 @@
  *
  *   const { data: member } = useMember(12);
  *   const { data: dues } = useMemberDues(12);
+ *   const { data: summary } = useMemberSummary(12);   // lifetime money, profit, per-account cards
  *   await memberWrites.update(12, body);
  *   await invalidateMembers(12);
  *
@@ -16,6 +17,7 @@ import { dropQueries, invalidate, invalidateExcept, type QueryTag } from './inva
 import { queryKeys, type QueryKey, type QueryParams } from './keys';
 import { prefetchQuery } from './prefetch';
 import type { DueAccount, DuesSummary } from './dues';
+import type { MemberSummary } from '../memberInsights';
 
 export const MEMBERS = 'members';
 /** Horizon of the dues shown on a member's page (overdue + next 30 days), as before. */
@@ -95,6 +97,23 @@ export interface PaymentHistoryItem {
   href: string;
 }
 
+/**
+ * Member 360 shapes, straight from the server modules (type-only imports: nothing of those
+ * files reaches the client bundle).
+ *   summary  GET ?action=summary&id=…   lib/memberInsights.ts buildMemberSummary
+ *   timeline GET ?action=timeline&id=…  lib/memberTimeline.ts getMemberTimeline (paged: items + meta,
+ *            plus totalCount / moneyIn / moneyOut over every page of the current filters)
+ */
+export type {
+  MemberSummary,
+  MemberSummaryTotals,
+  MemberSummaryChit,
+  MemberSummaryChitWin,
+  MemberSummaryLoan,
+  MemberSummaryLoanRecovery,
+} from '../memberInsights';
+export type { MemberTimelineItem, TimelineEventKind, TimelineDirection, TimelineKindFilter } from '../memberTimeline';
+
 /** Body of create/update, in the key order the members page has always sent. */
 export interface MemberBody {
   id: number;
@@ -111,9 +130,10 @@ export const memberKeys = {
   list: (params?: QueryParams): QueryKey => queryKeys.list(MEMBERS, params),
   detail: (id: number): QueryKey => queryKeys.detail(MEMBERS, id),
   dues: (id: number, horizonDays = MEMBER_DUES_HORIZON): QueryKey => queryKeys.action(MEMBERS, 'dues', id, { horizonDays }),
+  summary: (id: number): QueryKey => queryKeys.action(MEMBERS, 'summary', id),
 };
 
-/** Every cached query about one member (detail, dues, history). */
+/** Every cached query about one member (detail, dues, summary, history, timeline). */
 export const memberTag = (id: number): QueryTag => [MEMBERS, undefined, id];
 
 // ─────────────────────────────────────────────────────────────── reads
@@ -126,10 +146,16 @@ export function useMemberDues(id: number | null, config?: SWRConfiguration<Membe
   return useSWR<MemberDues>(id ? memberKeys.dues(id) : null, config);
 }
 
-/** Start loading what a member's page shows first (detail + dues), ahead of navigation. */
+/** Lifetime money moved, profit earned and the per-chit / per-loan cards of the Overview tab. */
+export function useMemberSummary(id: number | null, config?: SWRConfiguration<MemberSummary>) {
+  return useSWR<MemberSummary>(id ? memberKeys.summary(id) : null, config);
+}
+
+/** Start loading what a member's page shows first (detail, dues, overview summary), ahead of navigation. */
 export function prefetchMember(id: number): void {
   prefetchQuery(memberKeys.detail(id));
   prefetchQuery(memberKeys.dues(id));
+  prefetchQuery(memberKeys.summary(id));
 }
 
 // ─────────────────────────────────────────────────────────────── writes
