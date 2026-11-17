@@ -82,7 +82,7 @@ export default function ChitFundMonthlyProfitCard() {
         </dl>
       ) : null}
       <p className="mx-4 mt-3 text-xs text-muted-foreground sm:mx-6">
-        Remaining commission is projected from recorded fixed schedules, assuming one payout per remaining fund month.
+        Remaining commission is projected from recorded fixed schedules, assuming one payout per member not yet paid out.
         Collections less payouts is a cash movement balance, not additional profit or cash available for loans.
       </p>
       <div className="mx-4 mt-4 flex flex-wrap items-center justify-between gap-2 border-t py-4 sm:mx-6">
