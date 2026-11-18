@@ -18,6 +18,12 @@ import { NON_RECOVERABLE, RecoveryError } from "../../../../lib/loanRecovery";
 import { PublicError, errorResponse } from "../../../../lib/apiError";
 import { parseListParams, type SortTarget } from "../../../../lib/list/server";
 import { buildMeta, MAX_PAGE_SIZE } from "../../../../lib/list/types";
+import { formatMoney } from "../../../../lib/format";
+
+/** ₹30,000 for whole rupees, ₹30,000.50 when there are paise. */
+function noteMoney(value: number): string {
+  return formatMoney(value, { decimals: Number.isInteger(value) ? 0 : 2 });
+}
 
 // List contract (lib/list/server.ts): public sort keys -> Prisma orderBy, never a raw column.
 const LOAN_SORTS: Record<string, SortTarget> = {
@@ -1120,17 +1126,22 @@ async function createLoan(request: NextRequest, currentUserId: number) {
     // Calculate balances before creating the transaction
     const loanAmount = parseFloat(body.amount);
     const documentCharge = body.documentCharge ? parseFloat(body.documentCharge) : 0;
-    const actualDisbursementAmount = loanAmount - documentCharge; // Actual cash given to member
+    // The document charge is kept back from the loan: the borrower gets
+    // amount − documentCharge in hand and still owes the full amount. The ledger
+    // records this gross: a LOAN_DISBURSEMENT of the full loan amount (debit)
+    // plus a DOCUMENT_CHARGE of the charge (credit), so the partner's net cash
+    // movement is −(amount − documentCharge), the cash that actually left.
+    const cashInHand = loanAmount - documentCharge;
     const affectedPartnerId = partner.id; // LOAN_DISBURSEMENT affects the sending partner
     
     const currentPartnerBalance = await getCurrentPartnerBalance(affectedPartnerId, currentUserId);
     const currentTotalBalance = await getCurrentTotalBalance(currentUserId);
     
-    // Calculate balance for actual disbursement (money going out)
+    // Balance after the gross disbursement (full loan amount going out)
     const disbursementBalanceCalculation = calculateTransactionBalance(
       {
         type: TRANSACTION_TYPES_CONFIG.LOAN_DISBURSEMENT,
-        amount: actualDisbursementAmount, // Use actual amount given to member
+        amount: loanAmount, // Gross: the full loan amount
         from_partner_id: partner.id,
         to_partner_id: null
       },
@@ -1139,7 +1150,7 @@ async function createLoan(request: NextRequest, currentUserId: number) {
       currentTotalBalance
     );
 
-    // Calculate balance for document charge (income coming in)
+    // Balance after the document charge kept back (comes back in, on top of the gross disbursement)
     let documentChargeBalanceCalculation = null;
     if (documentCharge > 0) {
       documentChargeBalanceCalculation = calculateTransactionBalance(
@@ -1157,13 +1168,15 @@ async function createLoan(request: NextRequest, currentUserId: number) {
 
     // Use Prisma transaction to create both transactions and loan atomically
     const result = await prisma.$transaction(async (tx) => {
-      // 1. Create the LOAN_DISBURSEMENT transaction (actual cash given to member)
+      // 1. Create the LOAN_DISBURSEMENT transaction (gross: the full loan amount)
       const disbursementTransaction = await tx.transaction.create({
         data: {
           type: TRANSACTION_TYPES_CONFIG.LOAN_DISBURSEMENT,
-          amount: actualDisbursementAmount,
+          amount: loanAmount,
           date: disbursementDate,
-          note: `Loan disbursed to ${body.borrowerName}`,
+          note: documentCharge > 0
+            ? `Loan disbursed to ${body.borrowerName} - ${noteMoney(loanAmount)} loan − ${noteMoney(documentCharge)} document charge kept back = ${noteMoney(cashInHand)} paid`
+            : `Loan disbursed to ${body.borrowerName}`,
           createdById: currentUserId,
           action_performer: partner.name,
           entered_by: partner.name,
@@ -1203,7 +1216,11 @@ async function createLoan(request: NextRequest, currentUserId: number) {
         },
       });
 
-      // 2. Create the DOCUMENT_CHARGE transaction if applicable (income)
+      // 2. Create the DOCUMENT_CHARGE transaction if applicable (the charge kept
+      //    back from the gross disbursement). Loan deletion and the amount flow
+      //    tally find this entry by type + amount + date + the exact note
+      //    "Document charge for loan to <borrowerName>" (there is no FK), so keep
+      //    this note unchanged.
       let documentChargeTransaction = null;
       if (documentCharge > 0 && documentChargeBalanceCalculation) {
         documentChargeTransaction = await tx.transaction.create({

@@ -8,8 +8,11 @@
  * runs the queries and passes the sums in, so this can be unit-tested without a database.
  *
  * Business rule: a loan's document charge is kept back from the loan. The borrower gets
- * `amount − documentCharge` in hand and never pays the charge separately, so the cash given
- * is `amount − documentCharge` and a withheld document charge is not a cash inflow.
+ * `amount − documentCharge` in hand, never pays the charge separately and still owes the full
+ * amount. The ledger records this gross: a LOAN_DISBURSEMENT of the full loan amount (out)
+ * plus a DOCUMENT_CHARGE of the charge (in), which nets to the cash actually given. The records
+ * side mirrors that: Σ loan.amount on the disbursement row, Σ loan.documentCharge on the
+ * document-charge row, so a loan recorded this way shows no gap on either row.
  *
  * Each row's `difference` is its effect on the balance: (ledger − records) for money in,
  * (records − ledger) for money out. The rows' differences therefore add up to
@@ -52,13 +55,16 @@ export interface TallyLoanDetail {
   borrower: string;
   amount: number;
   documentCharge: number;
-  /** amount − documentCharge: the cash the borrower got. */
+  /** amount − documentCharge: the cash the borrower got (gross disbursement − charge kept back). */
   cashGiven: number;
   ledgerDisbursed: number | null;
   /** The DOCUMENT_CHARGE ledger entry matched to this loan, if any. */
   ledgerDocumentCharge: number | null;
   documentChargeTransactionId: number | null;
-  /** This loan's effect on the balance difference: cashGiven − ledgerDisbursed + ledgerDocumentCharge. */
+  /**
+   * This loan's effect on the balance difference: cashGiven − ledgerDisbursed + ledgerDocumentCharge.
+   * Zero for a loan recorded gross (disbursed = amount, document-charge entry = charge).
+   */
   difference: number;
 }
 
@@ -76,8 +82,10 @@ export interface AmountFlowTallyInput {
     contributions: number;
     repayments: number;
     auctionPayouts: number;
-    /** Σ (loan.amount − documentCharge). */
-    loanCashGiven: number;
+    /** Σ loan.amount: the gross disbursements (the ledger's LOAN_DISBURSEMENT side). */
+    loanAmounts: number;
+    /** Σ loan.documentCharge: the charges kept back (the ledger's DOCUMENT_CHARGE side). */
+    documentCharges: number;
   };
   /** Σ Transaction.amount per type (RECORD_AMOUNT excluded; it comes in as investedNet). */
   ledgerByType: Record<string, number>;
@@ -188,9 +196,9 @@ export function computeAmountFlowTally(input: AmountFlowTallyInput): AmountFlowT
     row('invested', 'Invested (net)', 'in', input.investedNet, input.investedNet),
     row('contributions', 'Chit contributions', 'in', input.records.contributions, ledger('CHIT_CONTRIBUTION')),
     row('repayments', 'Loan repayments', 'in', input.records.repayments, ledger('LOAN_REPAYMENT') + ledger('loan_repaid')),
-    row('documentCharges', 'Document charges (kept back from loans)', 'in', 0, ledger('DOCUMENT_CHARGE')),
+    row('documentCharges', 'Document charges (kept back from loans)', 'in', input.records.documentCharges, ledger('DOCUMENT_CHARGE')),
     row('auctionPayouts', 'Auction payouts', 'out', input.records.auctionPayouts, ledger('AUCTION_PAYOUT')),
-    row('loanCashGiven', 'Cash given to borrowers', 'out', input.records.loanCashGiven, ledger('LOAN_DISBURSEMENT') + ledger('loan_given')),
+    row('loanDisbursements', 'Loans disbursed (full amount)', 'out', input.records.loanAmounts, ledger('LOAN_DISBURSEMENT') + ledger('loan_given')),
   ];
 
   // Other entries that move the total balance (manual collections, expenses, adjustments).
@@ -213,7 +221,9 @@ export function computeAmountFlowTally(input: AmountFlowTallyInput): AmountFlowT
   const difference = round2(ledgerBalance - recordsExpectedBalance);
   const runningBalance = input.runningBalance === undefined || input.runningBalance === null ? null : round2(input.runningBalance);
 
-  // Per-loan drill-down: loans whose ledger entries differ from the cash actually given.
+  // Per-loan drill-down: loans whose ledger entries are not the gross pair (disbursed = amount,
+  // plus a document-charge entry when there is a charge). `difference` is the balance effect;
+  // a loan recorded net with no charge entry is listed with a zero difference.
   const loans = input.loans ?? [];
   const { byLoan, unmatched } = matchDocumentCharges(loans, input.documentCharges ?? []);
   const loanDetails: TallyLoanDetail[] = [];
@@ -222,8 +232,9 @@ export function computeAmountFlowTally(input: AmountFlowTallyInput): AmountFlowT
     const doc = byLoan.get(loan.id) ?? null;
     const ledgerDocumentCharge = doc ? round2(doc.amount) : null;
     const diff = round2(cashGiven - (loan.ledgerDisbursed ?? 0) + (ledgerDocumentCharge ?? 0));
-    const disbursementMismatch = loan.ledgerDisbursed === null || Math.abs(loan.ledgerDisbursed - cashGiven) >= 0.005;
-    if (!disbursementMismatch && !doc) continue;
+    const disbursementMismatch = loan.ledgerDisbursed === null || Math.abs(loan.ledgerDisbursed - loan.amount) >= 0.005;
+    const missingDocumentCharge = loan.documentCharge > 0 && !doc;
+    if (!disbursementMismatch && !missingDocumentCharge && Math.abs(diff) < 0.005) continue;
     loanDetails.push({
       id: loan.id,
       borrower: loan.borrower,

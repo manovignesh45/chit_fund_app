@@ -32,7 +32,7 @@ const tx = (createdById, date, type, amount, fields = {}) => ({
 const transactions = [
   tx(1, '2024-12-01', 'LOAN_DISBURSEMENT', 5000, { from_partner_id: 1, note: 'Early loan' }),
   tx(1, '2025-06-30', 'RECORD_AMOUNT', 100000, { to_partner_id: 1, note: 'Old amount reset' }), // unclassified
-  tx(1, '2025-07-10', 'LOAN_DISBURSEMENT', 9700, { from_partner_id: 1 }),
+  tx(1, '2025-07-10', 'LOAN_DISBURSEMENT', 10000, { from_partner_id: 1 }), // gross: loan 1's full amount
   tx(1, '2025-08-05', 'LOAN_REPAYMENT', 1500, { to_partner_id: 2 }),
   tx(1, '2025-08-05', 'DOCUMENT_CHARGE', 300, { to_partner_id: 1 }),
   tx(1, '2025-09-01', 'CHIT_CONTRIBUTION', 5000, { to_partner_id: 1 }),
@@ -228,7 +228,7 @@ test('owner scoping: every read is the owner\'s; nothing of another account reac
   assert.equal(pl.netProfit.total, 9600);
   assert.deepEqual(res.body.report.partnerShare.partners, [{ partnerId: 1, name: 'Ravi', share: 4800 }, { partnerId: 2, name: 'Kumar', share: 4800 }]);
   assert.equal(res.body.report.cashFlow.opening, -5000, 'opening: the 1 Dec 2024 loan only');
-  assert.equal(res.body.report.cashFlow.closing, -5000 + 100000 - 9700 + 1500 + 300 + 5000 - 40000 - 1200);
+  assert.equal(res.body.report.cashFlow.closing, -5000 + 100000 - 10000 + 1500 + 300 + 5000 - 40000 - 1200);
 
   currentUser = 2;
   try {
@@ -256,9 +256,9 @@ test('the response is buildItrReport of the owner\'s rows, without records; the 
   const unclassified = res.body.report.warnings.find((w) => w.code === 'UNCLASSIFIED_ENTRIES');
   assert.equal(unclassified.count, 1, 'the 30 Jun 2025 entry; the 2 May 2026 misfit is in the next year');
   assert.equal(unclassified.recordCount, 1);
-  const docs = res.body.report.warnings.find((w) => w.code === 'DOCUMENT_CHARGE_LEDGER');
-  assert.equal(docs.recordCount, 1);
-  assert.equal('records' in docs, false);
+  assert.equal('records' in unclassified, false);
+  // Document-charge ledger entries are ordinary cash (loans are recorded gross): no warning.
+  assert.ok(!res.body.report.warnings.some((w) => w.code === 'DOCUMENT_CHARGE_LEDGER'));
 });
 
 test('scope reads: Chits skips loans, Loans skips chit funds, pooled scopes read only the period\'s ledger rows', async () => {
@@ -302,7 +302,7 @@ test('one line\'s records (section + line)', async () => {
   assert.equal(res.body.line.records.length, 1);
   assert.equal(res.body.line.total, 2000);
 
-  res = await get('fy=2025&section=warning&line=DOCUMENT_CHARGE_LEDGER');
+  res = await get('fy=2025&section=warning&line=UNCLASSIFIED_ENTRIES');
   assert.equal(res.body.line.records.length, 1);
 
   res = await get('fy=2026&section=pl&line=chitMargin&scope=loans');

@@ -204,7 +204,6 @@ export interface ItrPartnerShare {
 
 export type ItrWarningCode =
   | 'UNCLASSIFIED_ENTRIES'
-  | 'DOCUMENT_CHARGE_LEDGER'
   | 'NEGATIVE_OPENING_CASH'
   | 'NEGATIVE_CLOSING_CASH'
   | 'PERIOD_RUNNING';
@@ -332,13 +331,19 @@ function recordLines(direction: RecordAmountDirection): CashLineSpec[] {
   ];
 }
 
+/**
+ * Loans are in the ledger gross: a LOAN_DISBURSEMENT of the full loan amount (a payment) and a
+ * DOCUMENT_CHARGE of the charge kept back from it (a receipt), which together net to the cash the
+ * borrower got. The P&L takes the document-charge income from the loan records, not from these
+ * ledger entries, so it is not counted twice.
+ */
 const CASH_LINES: CashLineSpec[] = [
   { key: 'chitContributions', label: 'Chit contributions', side: 'in', scopes: ['all', 'chits'] },
   { key: 'loanRepayments', label: 'Loan repayments', side: 'in', scopes: ['all', 'loans'] },
-  { key: 'documentCharges', label: 'Document charges (ledger entries)', side: 'in', scopes: ['all', 'loans'] },
+  { key: 'documentCharges', label: 'Document charges (kept back from loans)', side: 'in', scopes: ['all', 'loans'] },
   ...recordLines('credit'),
   { key: 'auctionPayouts', label: 'Auction payouts', side: 'out', scopes: ['all', 'chits'] },
-  { key: 'loanDisbursements', label: 'Loans disbursed (cash given)', side: 'out', scopes: ['all', 'loans'] },
+  { key: 'loanDisbursements', label: 'Loans disbursed (full amount)', side: 'out', scopes: ['all', 'loans'] },
   ...recordLines('debit'),
 ];
 
@@ -575,7 +580,6 @@ export function buildItrReport(input: ItrReportInput, options: ItrReportOptions)
 
   let opening = 0;
   const unclassified: ItrRecord[] = [];
-  const documentChargeRows: ItrRecord[] = [];
 
   for (const row of input.transactions) {
     const t = time(row.date);
@@ -637,7 +641,6 @@ export function buildItrReport(input: ItrReportInput, options: ItrReportOptions)
     } else if (move.manual && move.category === null) {
       unclassified.push(record);
     }
-    if (row.type === 'DOCUMENT_CHARGE') documentChargeRows.push(record);
   }
 
   // ---- Assemble -----------------------------------------------------------
@@ -703,13 +706,6 @@ export function buildItrReport(input: ItrReportInput, options: ItrReportOptions)
       code: 'UNCLASSIFIED_ENTRIES', count: unclassified.length,
       amount: fromPaise(sumPaise(unclassified.map((r) => toPaise(r.amount)))), records: [...unclassified].sort(byDateThenId),
       message: `${unclassified.length} manual ${unclassified.length === 1 ? 'entry has' : 'entries have'} no category. They are kept out of the profit & loss until classified.`,
-    });
-  }
-  if (documentChargeRows.length) {
-    warnings.push({
-      code: 'DOCUMENT_CHARGE_LEDGER', count: documentChargeRows.length,
-      amount: fromPaise(sumPaise(documentChargeRows.map((r) => toPaise(r.amount)))), records: [...documentChargeRows].sort(byDateThenId),
-      message: 'Document-charge ledger entries are shown on their own cash line. They are under review: the charge is kept back from the loan, so these entries may count it twice.',
     });
   }
   if (withShared && opening < 0) {

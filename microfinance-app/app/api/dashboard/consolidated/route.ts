@@ -221,8 +221,10 @@ async function getCalendarMonth(request: NextRequest, currentUserId: number) {
 /**
  * Amount flow tally (lib/amountFlowTally.ts): the business records next to the cash ledger,
  * per category. Records use the same queries as the summary's Invested / Cash inflow / Cash
- * outflow cards; the ledger balance is the Partner-wise balance panel's Total balance
- * (getBalanceSummary), so the card matches both.
+ * outflow cards, except that loans are split gross like the ledger records them (Σ amount on
+ * the disbursement row, Σ document charge on the document-charge row; together they net to
+ * the cash outflow's amount − charge). The ledger balance is the Partner-wise balance panel's
+ * Total balance (getBalanceSummary), so the card matches both.
  */
 async function getAmountFlowTally(currentUserId: number) {
   try {
@@ -291,7 +293,8 @@ async function getAmountFlowTally(currentUserId: number) {
         contributions: contributionsSum._sum.amount || 0,
         repayments: repaymentsSum._sum.amount || 0,
         auctionPayouts: auctionsSum._sum.amount || 0,
-        loanCashGiven: loans.reduce((sum, loan) => sum + loanCashGiven(loan), 0),
+        loanAmounts: loans.reduce((sum, loan) => sum + (loan.amount || 0), 0),
+        documentCharges: loans.reduce((sum, loan) => sum + (loan.documentCharge || 0), 0),
       },
       ledgerByType,
       ledgerBalance: balanceSummary.totalBalance,

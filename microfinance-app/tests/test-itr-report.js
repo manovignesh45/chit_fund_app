@@ -88,8 +88,8 @@ const transactions = [
   tx(2, 'loan_repaid', D('2024-12-01'), 500, { to_partner_id: 1 }),
   tx(3, 'collection', D('2025-01-15'), 300, { to_partner_id: 2 }),
   // FY 2025-26
-  tx(10, 'LOAN_DISBURSEMENT', D('2025-04-05'), 9700, { from_partner_id: 1 }),
-  tx(11, 'DOCUMENT_CHARGE', D('2025-04-05'), 300, { to_partner_id: 1 }),
+  tx(10, 'LOAN_DISBURSEMENT', D('2025-04-05'), 10000, { from_partner_id: 1 }), // gross: loan 1's full amount
+  tx(11, 'DOCUMENT_CHARGE', D('2025-04-05'), 300, { to_partner_id: 1 }), // kept back: net 9,700 paid
   tx(12, 'CHIT_CONTRIBUTION', D('2025-05-01'), 4000, { to_partner_id: 1 }),
   tx(13, 'AUCTION_PAYOUT', D('2025-05-10'), 40000, { from_partner_id: 2 }),
   credit(14, D('2025-06-30'), 100000, 'OPENING_BALANCE', 'old amount reset', 1),
@@ -293,7 +293,7 @@ test('cash flow FY 2025-26 by line, with partner balances', () => {
     'record:OPENING_BALANCE:in': 100000, 'record:CAPITAL_IN:in': 10000.33, 'record:OTHER_INCOME:in': 0,
     'record:ADVANCE_RETURNED:in': 0, 'record:CORRECTION:in': 10, 'record:UNCLASSIFIED:in': 50700,
     'other:collection': 0,
-    auctionPayouts: 40000, loanDisbursements: 9700, 'record:DRAWINGS:out': 5000, 'record:EXPENSE:out': 1200,
+    auctionPayouts: 40000, loanDisbursements: 10000, 'record:DRAWINGS:out': 5000, 'record:EXPENSE:out': 1200,
     'record:ADVANCE_GIVEN:out': 0, 'record:CORRECTION:out': 20, 'record:UNCLASSIFIED:out': 800,
   };
   for (const [key, total] of Object.entries(expected)) assert.equal(cash(r, key).total, total, key);
@@ -309,13 +309,17 @@ test('cash flow FY 2025-26 by line, with partner balances', () => {
   assert.equal(cash(r, 'record:UNCLASSIFIED:out').label, 'Unclassified (debit)');
   assert.equal(cash(r, 'record:OPENING_BALANCE:in').label, 'Opening balance brought in');
   assert.equal(cf.totalReceipts.total, 171010.33);
-  assert.equal(cf.totalPayments.total, 56720);
-  assert.equal(cf.netMovement.total, 114290.33);
-  assert.equal(cf.closing, 105090.33);
+  assert.equal(cf.totalPayments.total, 57020);
+  assert.equal(cf.netMovement.total, 113990.33);
+  assert.equal(cf.closing, 104790.33);
+  // Loan 1 is in the ledger gross: 10,000 paid out, 300 kept back comes in; net 9,700 cash given.
+  assert.equal(cash(r, 'loanDisbursements').label, 'Loans disbursed (full amount)');
+  assert.equal(cash(r, 'documentCharges').label, 'Document charges (kept back from loans)');
+  assert.equal(cash(r, 'loanDisbursements').total - cash(r, 'documentCharges').total, 9700);
   assert.equal(cf.transfers.total, 23000);
   const byName = Object.fromEntries(cf.partners.map((p) => [p.name, p]));
   assert.deepEqual(Object.keys(byName), ['Ravi', 'Kumar', 'Unassigned']);
-  assert.deepEqual(byName.Ravi, { partnerId: 1, name: 'Ravi', opening: -9500, in: 119310.33, out: 11700, transfersIn: 3000, transfersOut: 20000, closing: 81110.33 });
+  assert.deepEqual(byName.Ravi, { partnerId: 1, name: 'Ravi', opening: -9500, in: 119310.33, out: 12000, transfersIn: 3000, transfersOut: 20000, closing: 80810.33 });
   assert.deepEqual(byName.Kumar, { partnerId: 2, name: 'Kumar', opening: 300, in: 50700, out: 45020, transfersIn: 20000, transfersOut: 3000, closing: 22980 });
   assert.deepEqual(byName.Unassigned, { partnerId: null, name: 'Unassigned', opening: 0, in: 1000, out: 0, transfersIn: 0, transfersOut: 0, closing: 1000 });
 });
@@ -544,10 +548,12 @@ test('manual entries: each category on its line, only EXPENSE and OTHER_INCOME i
   assert.ok(!pl(fy25, 'otherIncome').records.some((r) => r.id === 23));
 });
 
-test('document-charge ledger rows and running-period warnings', () => {
+test('document-charge ledger rows are cash only (no warning, income taken once from the loan); running-period warnings', () => {
   const fy25 = build(2025, 'FY');
-  const doc = fy25.warnings.find((w) => w.code === 'DOCUMENT_CHARGE_LEDGER');
-  assert.deepEqual([doc.count, doc.amount, doc.records[0].id], [1, 300, 11]);
+  assert.ok(!fy25.warnings.some((w) => w.code === 'DOCUMENT_CHARGE_LEDGER'));
+  assert.deepEqual(cash(fy25, 'documentCharges').records.map((r) => [r.id, r.amount]), [[11, 300]]);
+  // The P&L takes the charge from loan 1, not from ledger row 11.
+  assert.deepEqual(pl(fy25, 'documentCharges').records.map((r) => [r.kind, r.id, r.amount]), [['documentCharge', 1, 300]]);
   assert.ok(!fy25.warnings.some((w) => w.code === 'PERIOD_RUNNING'));
   assert.equal(fy25.period.status, 'complete');
   assert.equal(fy25.period.asOf, null);
@@ -603,12 +609,12 @@ test('scope loans: loan income, bad debts and loan cash only', () => {
   assert.deepEqual(r.profitAndLoss.expenses.map((l) => [l.key, l.total]), [['badDebtWrittenOff', 5000]]);
   assert.equal(r.profitAndLoss.netProfit.total, 6103.41);
   assert.deepEqual(r.cashFlow.receipts.map((l) => [l.key, l.total]), [['loanRepayments', 0], ['documentCharges', 300]]);
-  assert.deepEqual(r.cashFlow.payments.map((l) => [l.key, l.total]), [['loanDisbursements', 9700]]);
-  assert.equal(r.cashFlow.netMovement.total, -9400);
+  assert.deepEqual(r.cashFlow.payments.map((l) => [l.key, l.total]), [['loanDisbursements', 10000]]);
+  assert.equal(r.cashFlow.netMovement.total, -9700); // 10,000 gross out + 300 kept back = 9,700 cash given
   assert.equal(r.cashFlow.opening, null);
   assert.equal(r.partnerShare, null);
   assert.ok(r.notes.some((n) => n.includes('not allocated to Loans')));
-  assert.deepEqual(r.warnings.map((w) => w.code), ['DOCUMENT_CHARGE_LEDGER']);
+  assert.deepEqual(r.warnings, []);
   // The older lower-case types count as loan cash too.
   const fy24 = build(2024, 'FY', 'loans');
   assert.equal(fy24.cashFlow.netMovement.total, -9500);

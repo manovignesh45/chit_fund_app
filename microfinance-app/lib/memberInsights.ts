@@ -290,8 +290,9 @@ export function buildMemberSummary(
       disbursementDate: iso(loan.disbursementDate),
       principal: round2(loan.amount),
       documentCharge: round2(documentCharge),
-      // The LOAN_DISBURSEMENT ledger entry records amount − documentCharge as the cash given to the
-      // member (app/api/loans/consolidated/route.ts:1123 actualDisbursementAmount).
+      // Cash handed to the member: the document charge is kept back from the loan. The ledger
+      // records this gross (LOAN_DISBURSEMENT = amount, DOCUMENT_CHARGE = charge), netting to the
+      // same figure; see createLoan in app/api/loans/consolidated/route.ts.
       cashDisbursed: round2((loan.amount || 0) - documentCharge),
       totalRepaid: round2(repaid),
       profit: round2(profit),

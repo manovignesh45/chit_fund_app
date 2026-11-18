@@ -294,11 +294,6 @@ function warningText(w: ItrWarning): { title: string; text: string } {
         title: 'Unclassified manual entries',
         text: `${n} manual ${n === 1 ? 'entry' : 'entries'} in this period ${n === 1 ? 'has' : 'have'} no category, so ${n === 1 ? 'it is' : 'they are'} left out of the profit & loss. They still count in the cash flow. See the Manual entries sheet.`,
       };
-    case 'DOCUMENT_CHARGE_LEDGER':
-      return {
-        title: 'Document-charge ledger entries',
-        text: `${n} document-charge ledger ${n === 1 ? 'entry is' : 'entries are'} under review. The charge is already kept back from each loan, so these entries may count it twice. They are shown on their own cash line so the closing balance matches the app's total balance; the profit & loss takes the charge from the loans.`,
-      };
     case 'NEGATIVE_OPENING_CASH':
       return { title: 'Negative opening cash', text: 'Cash at the start of this period is negative: more was paid out than was recorded coming in before it. The difference was funded outside the ledger.' };
     case 'NEGATIVE_CLOSING_CASH':
@@ -713,7 +708,7 @@ export function itrExportNotes(report: ItrReport): string[] {
     'Unclassified manual entries are excluded from profit until a category is chosen in the app; they still count in the cash flow.',
     'Profit is shared equally between the partners (any odd paisa goes to the first partner). Cash held by each partner is a separate figure from the ledger.',
     'Cash flow comes from the app\'s ledger. The opening balance is every ledger entry before the period. Partner transfers move cash between partners and do not change the total.',
-    'Document-charge ledger entries, where they exist, are shown on their own cash line while they are under review; the profit & loss takes the charge from the loans, not from these entries.',
+    'In the cash flow a loan is shown gross: the full loan amount under "Loans disbursed (full amount)" and the document charge kept back under "Document charges (kept back from loans)"; together they are the cash the borrower received. The profit & loss takes the document charge from the loans, not from these cash entries, so it is counted once.',
     'Periods follow the Indian financial year (1 April to 31 March), with entries dated by their Indian (IST) calendar date. A running period runs to the as-of date on the Summary.',
     'Amounts are in Indian rupees to the paisa. Totals are the app\'s own figures, written as values (not spreadsheet formulas), so they equal the screen.',
     'This is a supporting statement prepared from the app\'s records. It is not a tax computation.',
