@@ -4,7 +4,11 @@
  * Used by the pending-loans / pending-chits APIs (month view) and the dues
  * API (overdue + upcoming view), so every screen agrees on the numbers.
  */
-import { getFundMonthCalendarDate } from './monthlyAggregations';
+import {
+  getFundMonthCalendarDate,
+  getMemberContributionForMonth,
+  getMonthlyLoanInstallment,
+} from './monthlyAggregations';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -81,11 +85,7 @@ export function agingBucket(days: number): AgingBucket {
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 export function getLoanInstallment(loan: LoanLike): number {
-  if (loan.installmentAmount) return loan.installmentAmount;
-  const reducing = loan.loanType === 'Reducing Balance' || loan.repaymentType === 'Reducing Balance';
-  return reducing
-    ? Math.round(((loan.remainingAmount || 0) * ((loan.interestPercentage || 0) / 100)) / 12)
-    : 0;
+  return getMonthlyLoanInstallment(loan);
 }
 
 export function getLoanDueDate(disbursementDate: Date | string, repaymentType: string, period: number): Date {
@@ -139,8 +139,7 @@ export function getChitExpectedContribution(
   chitFund: Pick<ChitFundLike, 'monthlyContribution' | 'firstMonthContribution'>,
   month: number
 ): number {
-  const monthly = chitFund.monthlyContribution || 0;
-  return month === 1 ? (chitFund.firstMonthContribution ?? monthly) : monthly;
+  return getMemberContributionForMonth(chitFund, month);
 }
 
 /** Unpaid (or partly paid) chit contributions for one member whose due date falls in `range`. */

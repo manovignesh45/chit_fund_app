@@ -24,6 +24,35 @@ export interface ChitFundForAggregation {
   chitFundType?: string;
 }
 
+/**
+ * A loan's regular instalment. Reducing Balance loans have no fixed instalment
+ * stored; each month they owe the interest on what is still outstanding.
+ * Shared with the Dues Tracker (duesTracker.getLoanInstallment) so every
+ * screen expects the same amount.
+ */
+export function getMonthlyLoanInstallment(loan: {
+  installmentAmount?: number | null;
+  loanType?: string | null;
+  repaymentType?: string | null;
+  remainingAmount?: number | null;
+  interestPercentage?: number | null;
+}): number {
+  if (loan.installmentAmount) return loan.installmentAmount;
+  const reducing = loan.loanType === 'Reducing Balance' || loan.repaymentType === 'Reducing Balance';
+  return reducing
+    ? Math.round(((loan.remainingAmount || 0) * ((loan.interestPercentage || 0) / 100)) / 12)
+    : 0;
+}
+
+/** Contribution one member owes for a fund month: month 1 uses the first-month amount. */
+export function getMemberContributionForMonth(
+  fund: { monthlyContribution?: number | null; firstMonthContribution?: number | null },
+  month: number
+): number {
+  const monthly = fund.monthlyContribution || 0;
+  return month === 1 ? (fund.firstMonthContribution ?? monthly) : monthly;
+}
+
 /** Map a chit fund's month-of-fund (1-based) to its calendar payment date. */
 export function getFundMonthCalendarDate(
   startDate: Date | string,
@@ -51,7 +80,7 @@ export function computeExpectedLoanRepayment(
   let expectedLoanRepayment = 0;
 
   for (const loan of allLoans) {
-    const installment = loan.installmentAmount || 0;
+    const installment = getMonthlyLoanInstallment(loan);
     const loanTermEnd = new Date(loan.disbursementDate);
     let paymentDate = new Date(loan.disbursementDate);
 
@@ -101,8 +130,7 @@ export function computeExpectedChitContribution(
     ) {
       if (paymentDate >= startDate) {
         // Every member pays the first-month amount in month 1 (same rule as the Dues Tracker).
-        const perMember = month === 1 ? (cf.firstMonthContribution ?? contribution) : contribution;
-        expectedChitContribution += perMember * membersCount;
+        expectedChitContribution += getMemberContributionForMonth(cf, month) * membersCount;
       }
       paymentDate.setMonth(paymentDate.getMonth() + 1);
       month++;
@@ -125,7 +153,7 @@ export function computeAggregations(
   const periodsInRange = new Set<string>();
 
   for (const loan of allLoans) {
-    const installment = loan.installmentAmount || 0;
+    const installment = getMonthlyLoanInstallment(loan);
     const loanTermEnd = new Date(loan.disbursementDate);
     let paymentDate = new Date(loan.disbursementDate);
     let period = 1;
@@ -177,7 +205,7 @@ export function computeAggregations(
       month <= cf.duration
     ) {
       if (paymentDate >= startDate) {
-        expectedChitContribution += contribution * membersCount;
+        expectedChitContribution += getMemberContributionForMonth(cf, month) * membersCount;
         chitMonthsInRange.add(`${cf.id}-${month}`);
       }
       paymentDate.setMonth(paymentDate.getMonth() + 1);
