@@ -5,7 +5,7 @@ import { getCurrentTotalBalance, getTotalBalanceAsOf } from '../../../../lib/bal
 import {
   computeBaselineAndSimulated,
   computeUnbookedAuctionLiability,
-  getFundMonthForCalendarMonth,
+  computeOutstandingDues,
   RecordedMonthTotals,
 } from '../../../../lib/consolidatedProjection';
 
@@ -57,7 +57,6 @@ export async function GET(request: NextRequest) {
       pastMonthClosingBalance,
       pastMonthRecorded,
       currentMonthRecorded,
-      currentMonthRepayments,
     ] = await Promise.all([
         prisma.loan.findMany({
           where: {
@@ -70,6 +69,13 @@ export async function GET(request: NextRequest) {
             disbursementDate: true,
             duration: true,
             repaymentType: true,
+            loanType: true,
+            remainingAmount: true,
+            interestPercentage: true,
+            status: true,
+            repayments: {
+              select: { period: true, amount: true, paidDate: true, paymentType: true },
+            },
           },
         }),
         prisma.chitFund.findMany({
@@ -78,7 +84,13 @@ export async function GET(request: NextRequest) {
             status: 'Active',
           },
           include: {
-            members: true,
+            members: {
+              include: {
+                contributions: {
+                  select: { month: true, amount: true, paidDate: true, balancePaymentStatus: true },
+                },
+              },
+            },
             fixedAmounts: true,
             auctionBookings: {
               include: {
@@ -105,38 +117,17 @@ export async function GET(request: NextRequest) {
         getTotalBalanceAsOf(currentUserId, startOfCurrentMonth),
         getRecordedMonthTotals(currentUserId, startOfPreviousMonth, startOfCurrentMonth),
         getRecordedMonthTotals(currentUserId, startOfCurrentMonth, startOfNextMonth),
-        prisma.repayment.findMany({
-          where: {
-            loan: { createdById: currentUserId, status: 'Active' },
-            paidDate: { gte: startOfCurrentMonth, lt: startOfNextMonth },
-          },
-          select: { loanId: true, amount: true },
-        }),
       ]);
 
-    const currentMonthRepaidByLoan: Record<number, number> = {};
-    for (const r of currentMonthRepayments) {
-      currentMonthRepaidByLoan[r.loanId] = (currentMonthRepaidByLoan[r.loanId] || 0) + r.amount;
-    }
-
-    // Each fund's instalment that falls in this calendar month, and what's been collected against it.
-    const currentFundMonths = activeChitFunds
-      .map((f) => ({
-        chitFundId: f.id,
-        month: getFundMonthForCalendarMonth(f, now.getFullYear(), now.getMonth() + 1),
-      }))
-      .filter((fm): fm is { chitFundId: number; month: number } => fm.month !== null);
-    const currentMonthContributionsByFundMonth: Record<string, number> = {};
-    if (currentFundMonths.length > 0) {
-      const contributionGroups = await prisma.contribution.groupBy({
-        by: ['chitFundId', 'month'],
-        where: { OR: currentFundMonths },
-        _sum: { amount: true },
-      });
-      for (const g of contributionGroups) {
-        currentMonthContributionsByFundMonth[`${g.chitFundId}-${g.month}`] = g._sum.amount ?? 0;
-      }
-    }
+    // Everything still owed up to the end of this month, counted the way the Dues Tracker does.
+    const endOfCurrentMonth = new Date(startOfNextMonth.getTime() - 1);
+    const currentMonthOutstanding = computeOutstandingDues(
+      activeLoans,
+      activeChitFunds,
+      startOfCurrentMonth,
+      endOfCurrentMonth,
+      now
+    );
 
     let simulation;
     if (simulateFundId && simulateFromYear && simulateFromMonth) {
@@ -196,8 +187,7 @@ export async function GET(request: NextRequest) {
         pastMonthClosingBalance,
         pastMonthRecorded,
         currentMonthRecorded,
-        currentMonthRepaidByLoan,
-        currentMonthContributionsByFundMonth,
+        currentMonthOutstanding,
         simulation,
       }
     );

@@ -16,6 +16,14 @@ import {
   fundHasContributionInCalendarMonth,
 } from './monthlyAggregations';
 import { getPrizeAmountPerWinner } from './auctionProjection';
+import {
+  computeChitMemberDuePeriods,
+  computeLoanDuePeriods,
+  getLoanInstallment,
+  type ContributionLike,
+  type DuePeriod,
+  type LoanLike,
+} from './duesTracker';
 
 export interface ChitFundWithBookings extends ChitFundForAggregation {
   totalAmount: number;
@@ -57,6 +65,8 @@ export interface ConsolidatedProjectionRow {
     loanRepaymentsReceived: number;
     chitContributionsReceived: number;
     auctionPayoutsPaid: number;
+    /** Included in this month's collection: unpaid dues from earlier months */
+    overdueFromEarlierMonths: number;
   };
   /** Whether isPastMonth's cumulativeBalance is a rough estimate rather than a real recorded balance */
   isPastBalanceEstimated?: boolean;
@@ -99,6 +109,18 @@ export interface RecordedMonthTotals {
   chitContributions: number;
 }
 
+/**
+ * What members still owe up to the end of this month, the same way the Dues
+ * Tracker counts it: unpaid instalments falling due this month, plus older
+ * ones that are still unpaid.
+ */
+export interface OutstandingDues {
+  loanRepayments: number;
+  chitContributions: number;
+  /** Part of the two figures above that fell due before this calendar month */
+  fromEarlierMonths: number;
+}
+
 export interface ConsolidatedProjectionOptions {
   actualAuctions?: ActualAuctionRecord[];
   /** Today's real total balance (the same figure the dashboard shows) */
@@ -109,60 +131,46 @@ export interface ConsolidatedProjectionOptions {
   pastMonthRecorded?: RecordedMonthTotals;
   /** Ledger totals for this month so far */
   currentMonthRecorded?: RecordedMonthTotals;
-  /** Repayments recorded this calendar month, by loan id — used to work out what is still due */
-  currentMonthRepaidByLoan?: Record<number, number>;
-  /**
-   * Contributions recorded against each fund's instalment that falls in this
-   * calendar month, keyed `${fundId}-${fundMonth}` — used to work out what is still due
-   */
-  currentMonthContributionsByFundMonth?: Record<string, number>;
+  /** Still owed up to the end of this month; without it the whole month's schedule is assumed outstanding */
+  currentMonthOutstanding?: OutstandingDues;
   simulation?: ConsolidatedSimulationOptions;
 }
 
-/** Calendar-month fund month (1-based) for a fund, or null if the fund has no instalment then. */
-export function getFundMonthForCalendarMonth(
-  fund: { startDate: Date | string; duration: number },
-  year: number,
-  month: number
-): number | null {
-  for (let m = 1; m <= fund.duration; m++) {
-    if (isDateInCalendarMonth(getFundMonthCalendarDate(fund.startDate, m), year, month)) {
-      return m;
+/**
+ * Sums what is still owed up to `monthEnd` using the Dues Tracker's own rules,
+ * split into this month's dues and older unpaid ones.
+ */
+export function computeOutstandingDues(
+  loans: (LoanLike & { id: number })[],
+  chitFunds: { startDate: Date | string; duration: number; monthlyContribution?: number | null; firstMonthContribution?: number | null; members: { contributions: ContributionLike[] }[] }[],
+  monthStart: Date,
+  monthEnd: Date,
+  asOf: Date = new Date()
+): OutstandingDues {
+  const range = { start: new Date(0), end: monthEnd };
+  let loanRepayments = 0;
+  let chitContributions = 0;
+  let fromEarlierMonths = 0;
+  const add = (periods: DuePeriod[]) => {
+    let sum = 0;
+    for (const p of periods) {
+      sum += p.outstanding;
+      if (new Date(p.dueDate) < monthStart) fromEarlierMonths += p.outstanding;
+    }
+    return sum;
+  };
+  for (const loan of loans) loanRepayments += add(computeLoanDuePeriods(loan, range, asOf));
+  for (const fund of chitFunds) {
+    for (const member of fund.members) {
+      chitContributions += add(computeChitMemberDuePeriods(fund, member.contributions, range, asOf));
     }
   }
-  return null;
-}
-
-/** Loan instalments due this calendar month that have not been paid yet (per loan, never below zero). */
-function getRemainingLoanRepayments(
-  loans: LoanForAggregation[],
-  cal: CalendarMonth,
-  repaidByLoan: Record<number, number>
-): number {
-  let remaining = 0;
-  for (const loan of loans) {
-    const due = computeExpectedLoanRepayment([loan], cal.start, cal.end);
-    if (due <= 0) continue;
-    remaining += Math.max(0, due - (repaidByLoan[loan.id] || 0));
-  }
-  return remaining;
-}
-
-/** Chit contributions due this calendar month that have not been collected yet (per fund, never below zero). */
-function getRemainingChitContributions(
-  chitFunds: ChitFundForAggregation[],
-  cal: CalendarMonth,
-  receivedByFundMonth: Record<string, number>
-): number {
-  let remaining = 0;
-  for (const fund of chitFunds) {
-    const due = computeExpectedChitContribution([fund], cal.start, cal.end);
-    if (due <= 0) continue;
-    const fundMonth = getFundMonthForCalendarMonth(fund, cal.year, cal.month);
-    const received = fundMonth === null ? 0 : receivedByFundMonth[`${fund.id}-${fundMonth}`] || 0;
-    remaining += Math.max(0, due - received);
-  }
-  return remaining;
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  return {
+    loanRepayments: round2(loanRepayments),
+    chitContributions: round2(chitContributions),
+    fromEarlierMonths: round2(fromEarlierMonths),
+  };
 }
 
 function isCurrentCalendarMonth(
@@ -402,7 +410,7 @@ function getSimulatedChitExtra(
 }
 
 export function computeConsolidatedProjection(
-  loans: LoanForAggregation[],
+  loansInput: LoanForAggregation[],
   chitFunds: (ChitFundWithBookings & { name?: string })[],
   options: ConsolidatedProjectionOptions = {}
 ): ConsolidatedProjectionRow[] {
@@ -412,10 +420,15 @@ export function computeConsolidatedProjection(
     pastMonthClosingBalance,
     pastMonthRecorded,
     currentMonthRecorded,
-    currentMonthRepaidByLoan = {},
-    currentMonthContributionsByFundMonth = {},
+    currentMonthOutstanding,
     simulation,
   } = options;
+  // Reducing Balance loans have no fixed instalment; they pay the month's
+  // interest on what is still outstanding (same rule as the Dues Tracker).
+  const loans = loansInput.map((loan) => ({
+    ...loan,
+    installmentAmount: getLoanInstallment({ ...loan, repayments: [] }),
+  }));
   const now = new Date();
   const rangeStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   const rangeEnd = getProjectionEndDate(chitFunds);
@@ -488,10 +501,13 @@ export function computeConsolidatedProjection(
 
     if (isCurrent) {
       // Only what is still to come this month — the rest is already in today's balance.
-      expectedLoanRepayments = getRemainingLoanRepayments(loans, cal, currentMonthRepaidByLoan);
+      expectedLoanRepayments = currentMonthOutstanding
+        ? currentMonthOutstanding.loanRepayments
+        : computeExpectedLoanRepayment(loans, cal.start, cal.end);
       expectedChitContributions =
-        getRemainingChitContributions(chitFunds, cal, currentMonthContributionsByFundMonth) +
-        simulatedExtra;
+        (currentMonthOutstanding
+          ? currentMonthOutstanding.chitContributions
+          : computeExpectedChitContribution(chitFunds, cal.start, cal.end)) + simulatedExtra;
 
       const actualPayout = buildActualPayoutDetails(
         getActualAuctionsForCalendarMonth(actualAuctions, cal.year, cal.month)
@@ -512,6 +528,7 @@ export function computeConsolidatedProjection(
         loanRepaymentsReceived: currentMonthRecorded?.loanRepayments ?? 0,
         chitContributionsReceived: currentMonthRecorded?.chitContributions ?? 0,
         auctionPayoutsPaid: actualPayout.total,
+        overdueFromEarlierMonths: currentMonthOutstanding?.fromEarlierMonths ?? 0,
       };
     } else {
       expectedLoanRepayments = computeExpectedLoanRepayment(loans, cal.start, cal.end);
