@@ -1,11 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '../../../../lib/prisma';
 import { getCurrentUserId } from '../../../../lib/auth';
-import { getCurrentTotalBalance } from '../../../../lib/balanceCalculator';
+import { getCurrentTotalBalance, getTotalBalanceAsOf } from '../../../../lib/balanceCalculator';
 import {
   computeBaselineAndSimulated,
   computeUnbookedAuctionLiability,
+  getFundMonthForCalendarMonth,
+  RecordedMonthTotals,
 } from '../../../../lib/consolidatedProjection';
+
+/** Loan repayments and chit contributions recorded in the ledger between two dates. */
+async function getRecordedMonthTotals(
+  userId: number,
+  from: Date,
+  to: Date
+): Promise<RecordedMonthTotals> {
+  const groups = await prisma.transaction.groupBy({
+    by: ['type'],
+    where: {
+      createdById: userId,
+      type: { in: ['LOAN_REPAYMENT', 'CHIT_CONTRIBUTION'] },
+      date: { gte: from, lt: to },
+    },
+    _sum: { amount: true },
+  });
+  const sumFor = (type: string) => groups.find((g) => g.type === type)?._sum.amount ?? 0;
+  return {
+    loanRepayments: sumFor('LOAN_REPAYMENT'),
+    chitContributions: sumFor('CHIT_CONTRIBUTION'),
+  };
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -22,9 +46,19 @@ export async function GET(request: NextRequest) {
 
     const now = new Date();
     const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfPreviousMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
 
-    const [activeLoans, activeChitFunds, openingBalance, completedAuctions, pastMonthClosingBalance] =
-      await Promise.all([
+    const [
+      activeLoans,
+      activeChitFunds,
+      openingBalance,
+      completedAuctions,
+      pastMonthClosingBalance,
+      pastMonthRecorded,
+      currentMonthRecorded,
+      currentMonthRepayments,
+    ] = await Promise.all([
         prisma.loan.findMany({
           where: {
             createdById: currentUserId,
@@ -66,8 +100,43 @@ export async function GET(request: NextRequest) {
             winner: { include: { globalMember: true } },
           },
         }),
-        getCurrentTotalBalance(currentUserId, startOfCurrentMonth),
+        // By transaction date, not the stored running total: a back-dated entry's
+        // running total also carries later-dated money recorded before it.
+        getTotalBalanceAsOf(currentUserId, startOfCurrentMonth),
+        getRecordedMonthTotals(currentUserId, startOfPreviousMonth, startOfCurrentMonth),
+        getRecordedMonthTotals(currentUserId, startOfCurrentMonth, startOfNextMonth),
+        prisma.repayment.findMany({
+          where: {
+            loan: { createdById: currentUserId, status: 'Active' },
+            paidDate: { gte: startOfCurrentMonth, lt: startOfNextMonth },
+          },
+          select: { loanId: true, amount: true },
+        }),
       ]);
+
+    const currentMonthRepaidByLoan: Record<number, number> = {};
+    for (const r of currentMonthRepayments) {
+      currentMonthRepaidByLoan[r.loanId] = (currentMonthRepaidByLoan[r.loanId] || 0) + r.amount;
+    }
+
+    // Each fund's instalment that falls in this calendar month, and what's been collected against it.
+    const currentFundMonths = activeChitFunds
+      .map((f) => ({
+        chitFundId: f.id,
+        month: getFundMonthForCalendarMonth(f, now.getFullYear(), now.getMonth() + 1),
+      }))
+      .filter((fm): fm is { chitFundId: number; month: number } => fm.month !== null);
+    const currentMonthContributionsByFundMonth: Record<string, number> = {};
+    if (currentFundMonths.length > 0) {
+      const contributionGroups = await prisma.contribution.groupBy({
+        by: ['chitFundId', 'month'],
+        where: { OR: currentFundMonths },
+        _sum: { amount: true },
+      });
+      for (const g of contributionGroups) {
+        currentMonthContributionsByFundMonth[`${g.chitFundId}-${g.month}`] = g._sum.amount ?? 0;
+      }
+    }
 
     let simulation;
     if (simulateFundId && simulateFromYear && simulateFromMonth) {
@@ -121,7 +190,16 @@ export async function GET(request: NextRequest) {
     const { projection, simulatedProjection } = computeBaselineAndSimulated(
       activeLoans,
       chitFundsInput,
-      { actualAuctions, openingBalance, pastMonthClosingBalance, simulation }
+      {
+        actualAuctions,
+        openingBalance,
+        pastMonthClosingBalance,
+        pastMonthRecorded,
+        currentMonthRecorded,
+        currentMonthRepaidByLoan,
+        currentMonthContributionsByFundMonth,
+        simulation,
+      }
     );
 
     // Single source of truth for both the unbooked head count and what those

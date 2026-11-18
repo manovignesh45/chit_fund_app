@@ -77,6 +77,13 @@ interface ProjectionRow {
   isPastMonth?: boolean;
   isPastBalanceEstimated?: boolean;
   bookedMembers?: BookedMember[];
+  /** Current month only: what has already happened (the row's columns are what's still to come). */
+  monthToDate?: {
+    balanceToday: number;
+    loanRepaymentsReceived: number;
+    chitContributionsReceived: number;
+    auctionPayoutsPaid: number;
+  };
 }
 
 interface ProjectionResponse {
@@ -351,14 +358,12 @@ function Projection() {
                 ) : null}
                 {openingBalance !== null ? (
                   <p className="border-b px-4 py-2 text-xs text-muted-foreground">
-                    {lastMonthRow ? (
-                      <>
-                        Each month builds forward from last month&apos;s real closing balance ({formatMoney(lastMonthRow.cumulativeBalance)}), adding that month&apos;s
-                        own projected activity — including auction winners booked but not yet paid — so you can see what will remain after those payouts go out.
-                      </>
-                    ) : (
-                      <>This month starts from your actual cash balance ({formatMoney(openingBalance)}) and projects forward from there.</>
-                    )}
+                    This month starts from today&apos;s actual balance ({formatMoney(openingBalance)}, the same as the dashboard) and adds only what is still due
+                    this month — unpaid chit contributions and loan instalments, less booked auction winners not yet paid. Each later month builds on from
+                    there. New loans you give out are not predicted, so the balance drops by that amount when you give one.
+                    {lastMonthRow && !lastMonthRow.isPastBalanceEstimated ? (
+                      <> Last month shows what was actually recorded and its real closing balance ({formatMoney(lastMonthRow.cumulativeBalance)}).</>
+                    ) : null}
                   </p>
                 ) : null}
                 <p className="border-b px-4 py-2 text-xs text-muted-foreground">Select a calendar month to see booked auction winners.</p>
@@ -399,23 +404,50 @@ function monthInfo(row: ProjectionRow, idx: number, baseline: ProjectionRow[], c
     rowKey,
     detailsId: `projection-month-${rowKey}`,
     pendingAmount: isCurrent || isPastMonth ? booked.filter((b) => !b.isActual).reduce((sum, b) => sum + b.payoutAmount, 0) : 0,
+    paidAmount: isCurrent ? booked.filter((b) => b.isActual).reduce((sum, b) => sum + b.payoutAmount, 0) : 0,
   };
 }
 
 function MonthTags({ isCurrent, isPastMonth, bookedCount }: { isCurrent: boolean; isPastMonth: boolean; bookedCount: number }) {
   return (
     <>
-      {isCurrent ? <span className="text-xs font-normal text-primary-text">(current)</span> : null}
-      {isPastMonth ? <span className="text-xs font-normal text-muted-foreground">(last month)</span> : null}
+      {isCurrent ? <span className="text-xs font-normal text-primary-text">(current · still to come)</span> : null}
+      {isPastMonth ? <span className="text-xs font-normal text-muted-foreground">(last month · recorded)</span> : null}
       {bookedCount > 0 ? <span className="text-xs font-normal text-muted-foreground">({bookedCount} booked)</span> : null}
     </>
   );
 }
 
-function CumulativeNotes({ isPastMonth, estimated, cumDiff }: { isPastMonth: boolean; estimated?: boolean; cumDiff: number }) {
+function PayoutNotes({ pendingAmount, paidAmount, isPastMonth }: { pendingAmount: number; paidAmount: number; isPastMonth: boolean }) {
+  return (
+    <>
+      {pendingAmount > 0 ? (
+        <span className="block text-xs text-muted-foreground">
+          ({formatMoney(pendingAmount)} {isPastMonth ? 'unpaid — moved to this month' : 'pending'})
+        </span>
+      ) : null}
+      {paidAmount > 0 ? <span className="block text-xs text-muted-foreground">({formatMoney(paidAmount)} already paid)</span> : null}
+    </>
+  );
+}
+
+function CumulativeNotes({
+  isPastMonth,
+  estimated,
+  cumDiff,
+  balanceToday,
+}: {
+  isPastMonth: boolean;
+  estimated?: boolean;
+  cumDiff: number;
+  balanceToday?: number;
+}) {
   return (
     <>
       {isPastMonth ? <span className="block text-xs font-normal text-muted-foreground">{estimated ? '(estimated)' : '(actual)'}</span> : null}
+      {balanceToday !== undefined ? (
+        <span className="block text-xs font-normal text-muted-foreground">today {formatMoney(balanceToday)}</span>
+      ) : null}
       {cumDiff !== 0 ? (
         <span className={cn('block text-xs font-normal', cumDiff >= 0 ? 'text-success-text' : 'text-destructive-text')}>
           {cumDiff >= 0 ? '+' : ''}
@@ -486,7 +518,7 @@ function ProjectionTable({
                     <dt className="text-xs text-muted-foreground">Auction payout</dt>
                     <dd>
                       {row.totalAuctionPayout > 0 ? <Money value={row.totalAuctionPayout} tone="outflow" /> : dash}
-                      {m.pendingAmount > 0 ? <span className="block text-xs text-muted-foreground">({formatMoney(m.pendingAmount)} pending)</span> : null}
+                      <PayoutNotes pendingAmount={m.pendingAmount} paidAmount={m.paidAmount} isPastMonth={m.isPastMonth} />
                     </dd>
                   </div>
                   <div>
@@ -509,13 +541,13 @@ function ProjectionTable({
                         <dt className="text-xs text-muted-foreground">Baseline cumulative</dt>
                         <dd>
                           {m.base ? <span className="text-muted-foreground">{formatMoney(m.base.cumulativeBalance)}</span> : dash}
-                          <CumulativeNotes isPastMonth={m.isPastMonth} estimated={row.isPastBalanceEstimated} cumDiff={m.cumDiff} />
+                          <CumulativeNotes isPastMonth={m.isPastMonth} estimated={row.isPastBalanceEstimated} cumDiff={m.cumDiff} balanceToday={row.monthToDate?.balanceToday} />
                         </dd>
                       </>
                     ) : (
                       <>
                         <dt className="text-xs text-muted-foreground">Balance is</dt>
-                        <dd>{m.isPastMonth ? (row.isPastBalanceEstimated ? 'Estimated' : 'Actual') : 'Projected'}</dd>
+                        <dd>{m.isPastMonth ? (row.isPastBalanceEstimated ? 'Estimated' : 'Actual') : m.isCurrent ? 'Today + still due' : 'Projected'}</dd>
                       </>
                     )}
                   </div>
@@ -523,6 +555,7 @@ function ProjectionTable({
               </button>
               {isExpanded ? (
                 <div id={m.detailsId} className="border-t px-3 pb-3 pt-3">
+                  <MonthToDate row={row} />
                   <BookedWinners row={row} showStatus={m.isCurrent || m.isPastMonth} />
                 </div>
               ) : null}
@@ -590,14 +623,14 @@ function ProjectionTable({
                     </td>
                     <td className="px-3 py-3 text-right">
                       {row.totalAuctionPayout > 0 ? <Money value={row.totalAuctionPayout} tone="outflow" /> : dash}
-                      {m.pendingAmount > 0 ? <span className="block text-xs text-muted-foreground">({formatMoney(m.pendingAmount)} pending)</span> : null}
+                      <PayoutNotes pendingAmount={m.pendingAmount} paidAmount={m.paidAmount} isPastMonth={m.isPastMonth} />
                     </td>
                     <td className={cn('px-3 py-3 text-right font-medium', row.net > 0 ? 'text-success-text' : row.net < 0 ? 'text-destructive-text' : '')}>
                       <Money value={row.net} tone="plain" />
                     </td>
                     <td className={cn('px-3 py-3 text-right font-semibold', row.cumulativeBalance >= 0 ? 'text-success-text' : 'text-destructive-text')}>
                       <Money value={row.cumulativeBalance} tone="plain" />
-                      <CumulativeNotes isPastMonth={m.isPastMonth} estimated={row.isPastBalanceEstimated} cumDiff={m.cumDiff} />
+                      <CumulativeNotes isPastMonth={m.isPastMonth} estimated={row.isPastBalanceEstimated} cumDiff={m.cumDiff} balanceToday={row.monthToDate?.balanceToday} />
                     </td>
                     {compareMode ? (
                       <td className="px-3 py-3 text-right text-muted-foreground">{m.base ? formatMoney(m.base.cumulativeBalance) : '—'}</td>
@@ -607,6 +640,7 @@ function ProjectionTable({
                     <tr id={`${m.detailsId}-row`} className="border-b bg-elevated">
                       <td colSpan={colSpan} className="px-4 py-4 sm:px-6">
                         <div className="max-w-3xl rounded-lg border bg-card p-4">
+                          <MonthToDate row={row} />
                           <BookedWinners row={row} showStatus={m.isCurrent || m.isPastMonth} />
                         </div>
                       </td>
@@ -619,6 +653,38 @@ function ProjectionTable({
         </table>
       </div>
     </>
+  );
+}
+
+/** Current month: how today's balance and the still-to-come columns fit together. */
+function MonthToDate({ row }: { row: ProjectionRow }) {
+  const mtd = row.monthToDate;
+  if (!mtd) return null;
+  const items: { label: string; value: React.ReactNode }[] = [
+    { label: 'Loan repayments received', value: <Money value={mtd.loanRepaymentsReceived} tone="plain" /> },
+    { label: 'Chit contributions received', value: <Money value={mtd.chitContributionsReceived} tone="plain" /> },
+    { label: 'Auction payouts made', value: <Money value={mtd.auctionPayoutsPaid} tone="plain" /> },
+    { label: 'Balance today', value: <Money value={mtd.balanceToday} tone="plain" /> },
+    { label: 'Still to collect', value: <Money value={row.totalExpectedCollection} tone="plain" /> },
+    { label: 'Still to pay out', value: <Money value={row.totalAuctionPayout} tone="plain" /> },
+  ];
+  return (
+    <div className="mb-4 border-b pb-4">
+      <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">So far this month</p>
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
+        {items.map((it) => (
+          <div key={it.label}>
+            <dt className="text-xs text-muted-foreground">{it.label}</dt>
+            <dd className="font-medium">{it.value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-3 text-xs text-muted-foreground">
+        Closing balance = balance today + still to collect − still to pay out ={' '}
+        <span className="font-medium text-foreground">{formatMoney(row.cumulativeBalance)}</span>. Today&apos;s balance already includes everything
+        recorded so far, including new loans given out and other expenses.
+      </p>
+    </div>
   );
 }
 

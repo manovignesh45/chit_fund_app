@@ -290,6 +290,62 @@ export async function getCurrentTotalBalance(
 }
 
 /**
+ * How much one transaction moves the total (all-partner) balance.
+ * Mirrors app/api/recalculate-balances, which is what the stored running totals come from.
+ */
+export function getTotalBalanceChange(transaction: {
+  type: string;
+  amount: number;
+  from_partner_id?: number | null;
+  to_partner_id?: number | null;
+}): number {
+  switch (transaction.type) {
+    case 'collection':
+    case 'CHIT_CONTRIBUTION':
+    case 'LOAN_REPAYMENT':
+    case 'loan_repaid':
+    case 'DOCUMENT_CHARGE':
+    case 'balance_adjustment':
+      return transaction.amount;
+    case 'expense':
+    case 'LOAN_DISBURSEMENT':
+    case 'loan_given':
+    case 'AUCTION_PAYOUT':
+      return -transaction.amount;
+    case 'RECORD_AMOUNT':
+      if (transaction.to_partner_id) return transaction.amount;
+      if (transaction.from_partner_id) return -transaction.amount;
+      return 0;
+    default:
+      // transfers between partners and unknown types leave the total unchanged
+      return 0;
+  }
+}
+
+/**
+ * Total balance of every transaction dated before `beforeDate` — i.e. the real
+ * closing balance at that moment.
+ *
+ * Not the same as getCurrentTotalBalance(userId, beforeDate): stored running
+ * totals follow entry (createdAt) order, so a back-dated entry carries the
+ * balance of everything recorded before it, including later-dated money.
+ */
+export async function getTotalBalanceAsOf(
+  userId: number,
+  beforeDate: Date,
+  db: DbClient = prisma
+): Promise<number> {
+  const transactions = await db.transaction.findMany({
+    where: { createdById: userId, date: { lt: beforeDate } },
+    select: { type: true, amount: true, from_partner_id: true, to_partner_id: true },
+  });
+  return transactions.reduce(
+    (sum: number, t: Parameters<typeof getTotalBalanceChange>[0]) => sum + getTotalBalanceChange(t),
+    0
+  );
+}
+
+/**
  * Recalculate balances for all transactions after a specific date/time
  * This is used when a transaction is deleted to update subsequent transaction balances
  */
