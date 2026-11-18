@@ -6,6 +6,9 @@
 export interface LoanForAggregation {
   id: number;
   installmentAmount: number;
+  loanType?: string | null;
+  remainingAmount?: number | null;
+  interestPercentage?: number | null;
   disbursementDate: Date | string;
   duration: number;
   repaymentType: string;
@@ -97,7 +100,9 @@ export function computeExpectedChitContribution(
       month <= cf.duration
     ) {
       if (paymentDate >= startDate) {
-        expectedChitContribution += contribution * membersCount;
+        // Every member pays the first-month amount in month 1 (same rule as the Dues Tracker).
+        const perMember = month === 1 ? (cf.firstMonthContribution ?? contribution) : contribution;
+        expectedChitContribution += perMember * membersCount;
       }
       paymentDate.setMonth(paymentDate.getMonth() + 1);
       month++;

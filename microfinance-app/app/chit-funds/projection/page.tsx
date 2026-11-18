@@ -83,6 +83,7 @@ interface ProjectionRow {
     loanRepaymentsReceived: number;
     chitContributionsReceived: number;
     auctionPayoutsPaid: number;
+    overdueFromEarlierMonths?: number;
   };
 }
 
@@ -358,8 +359,9 @@ function Projection() {
                 ) : null}
                 {openingBalance !== null ? (
                   <p className="border-b px-4 py-2 text-xs text-muted-foreground">
-                    This month starts from today&apos;s actual balance ({formatMoney(openingBalance)}, the same as the dashboard) and adds only what is still due
-                    this month — unpaid chit contributions and loan instalments, less booked auction winners not yet paid. Each later month builds on from
+                    This month starts from today&apos;s actual balance ({formatMoney(openingBalance)}, the same as the dashboard) and adds only what is still owed
+                    up to the end of this month — unpaid chit contributions and loan instalments, including overdue ones — less booked auction winners not yet
+                    paid. Each later month builds on from
                     there. New loans you give out are not predicted, so the balance drops by that amount when you give one.
                     {lastMonthRow && !lastMonthRow.isPastBalanceEstimated ? (
                       <> Last month shows what was actually recorded and its real closing balance ({formatMoney(lastMonthRow.cumulativeBalance)}).</>
@@ -665,7 +667,19 @@ function MonthToDate({ row }: { row: ProjectionRow }) {
     { label: 'Chit contributions received', value: <Money value={mtd.chitContributionsReceived} tone="plain" /> },
     { label: 'Auction payouts made', value: <Money value={mtd.auctionPayoutsPaid} tone="plain" /> },
     { label: 'Balance today', value: <Money value={mtd.balanceToday} tone="plain" /> },
-    { label: 'Still to collect', value: <Money value={row.totalExpectedCollection} tone="plain" /> },
+    {
+      label: 'Still to collect',
+      value: (
+        <>
+          <Money value={row.totalExpectedCollection} tone="plain" />
+          {(mtd.overdueFromEarlierMonths ?? 0) > 0 ? (
+            <span className="block text-xs font-normal text-muted-foreground">
+              incl. {formatMoney(mtd.overdueFromEarlierMonths ?? 0)} overdue from earlier months
+            </span>
+          ) : null}
+        </>
+      ),
+    },
     { label: 'Still to pay out', value: <Money value={row.totalAuctionPayout} tone="plain" /> },
   ];
   return (
@@ -682,7 +696,11 @@ function MonthToDate({ row }: { row: ProjectionRow }) {
       <p className="mt-3 text-xs text-muted-foreground">
         Closing balance = balance today + still to collect − still to pay out ={' '}
         <span className="font-medium text-foreground">{formatMoney(row.cumulativeBalance)}</span>. Today&apos;s balance already includes everything
-        recorded so far, including new loans given out and other expenses.
+        recorded so far, including new loans given out and other expenses. Still to collect is everything the{' '}
+        <Link href="/dues" className="underline underline-offset-2">
+          Dues Tracker
+        </Link>{' '}
+        lists as unpaid up to the end of this month.
       </p>
     </div>
   );
