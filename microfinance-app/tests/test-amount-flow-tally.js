@@ -13,7 +13,7 @@ const day = '2026-03-19T00:00:00.000Z';
 // payouts 40,000; one loan of 20,000 with no document charge.
 const base = {
   investedNet: 50000,
-  records: { contributions: 30000, repayments: 12000, auctionPayouts: 40000, loanCashGiven: 20000 },
+  records: { contributions: 30000, repayments: 12000, auctionPayouts: 40000, loanAmounts: 20000, documentCharges: 0 },
   ledgerByType: { CHIT_CONTRIBUTION: 30000, LOAN_REPAYMENT: 12000, AUCTION_PAYOUT: 40000, LOAN_DISBURSEMENT: 20000, PARTNER_TO_PARTNER: 9000 },
   ledgerBalance: 32000,
   runningBalance: 32000,
@@ -45,7 +45,7 @@ test('double-counted document charge: disbursement = amount − doc plus a DOCUM
   // Loan 20,700 with doc 700: borrower got 20,000; the ledger also took 700 in as cash.
   const t = computeAmountFlowTally({
     ...base,
-    records: { ...base.records, loanCashGiven: 20000 },
+    records: { ...base.records, loanAmounts: 20700, documentCharges: 700 },
     ledgerByType: { ...base.ledgerByType, LOAN_DISBURSEMENT: 20000, DOCUMENT_CHARGE: 700 },
     ledgerBalance: 32700,
     runningBalance: 32700,
@@ -56,9 +56,12 @@ test('double-counted document charge: disbursement = amount − doc plus a DOCUM
   assert.equal(t.ledgerBalance, 32700);
   assert.equal(t.difference, 700); // the ledger holds 700 the records never received
   assert.equal(t.tallied, false);
-  assert.equal(rowOf(t, 'loanCashGiven').difference, 0);
+  // The gap shows on the disbursement row: the ledger paid out 20,000, not the gross 20,700.
+  assert.deepEqual(rowOf(t, 'loanDisbursements'), {
+    key: 'loanDisbursements', label: 'Loans disbursed (full amount)', direction: 'out', records: 20700, ledger: 20000, difference: 700,
+  });
   assert.deepEqual(rowOf(t, 'documentCharges'), {
-    key: 'documentCharges', label: 'Document charges (kept back from loans)', direction: 'in', records: 0, ledger: 700, difference: 700,
+    key: 'documentCharges', label: 'Document charges (kept back from loans)', direction: 'in', records: 700, ledger: 700, difference: 0,
   });
   assert.equal(t.loanDetails.length, 1);
   assert.deepEqual(t.loanDetails[0], {
@@ -72,7 +75,7 @@ test('old-style loan: disbursement = full amount, no document-charge entry', () 
   // Loan 25,000 with doc 1,500: the borrower got 23,500 but the ledger paid out 25,000.
   const t = computeAmountFlowTally({
     ...base,
-    records: { ...base.records, loanCashGiven: 23500 },
+    records: { ...base.records, loanAmounts: 25000, documentCharges: 1500 },
     ledgerByType: { ...base.ledgerByType, LOAN_DISBURSEMENT: 25000 },
     ledgerBalance: 27000,
     runningBalance: 27000,
@@ -80,14 +83,52 @@ test('old-style loan: disbursement = full amount, no document-charge entry', () 
   });
   assert.equal(t.recordsExpectedBalance, 28500); // 92,000 − 40,000 − 23,500
   assert.equal(t.difference, -1500);
-  const cash = rowOf(t, 'loanCashGiven');
-  assert.equal(cash.records, 23500);
-  assert.equal(cash.ledger, 25000);
-  assert.equal(cash.difference, -1500); // out row: records − ledger
-  assert.equal(rowOf(t, 'documentCharges').difference, 0);
+  const out = rowOf(t, 'loanDisbursements');
+  assert.equal(out.records, 25000);
+  assert.equal(out.ledger, 25000);
+  assert.equal(out.difference, 0); // the gross disbursement is right
+  const doc = rowOf(t, 'documentCharges');
+  assert.equal(doc.records, 1500);
+  assert.equal(doc.ledger, 0);
+  assert.equal(doc.difference, -1500); // in row: the charge kept back was never entered
   assert.equal(t.loanDetails.length, 1);
   assert.equal(t.loanDetails[0].difference, -1500);
   assert.equal(t.loanDetails[0].ledgerDocumentCharge, null);
+});
+
+test('gross-recorded loan: disbursement = full amount plus a DOCUMENT_CHARGE entry tallies', () => {
+  // Loan 30,000 with doc 1,000: borrower got 29,000; ledger −30,000 + 1,000 = −29,000.
+  const t = computeAmountFlowTally({
+    ...base,
+    records: { ...base.records, loanAmounts: 30000, documentCharges: 1000 },
+    ledgerByType: { ...base.ledgerByType, LOAN_DISBURSEMENT: 30000, DOCUMENT_CHARGE: 1000 },
+    ledgerBalance: 23000,
+    runningBalance: 23000,
+    loans: [{ id: 30, borrower: 'Kavin', amount: 30000, documentCharge: 1000, disbursementTransactionDate: day, ledgerDisbursed: 30000 }],
+    documentCharges: [{ id: 501, amount: 1000, date: day, note: 'Document charge for loan to Kavin' }],
+  });
+  assert.equal(t.recordsExpectedBalance, 23000); // 92,000 + 1,000 − 40,000 − 30,000
+  assert.equal(t.difference, 0);
+  assert.equal(t.tallied, true);
+  for (const r of t.rows) assert.equal(r.difference, 0, r.key);
+  assert.deepEqual(t.loanDetails, []);
+  assert.deepEqual(t.unmatchedDocumentCharges, []);
+});
+
+test('net-recorded loan with no charge entry is listed with a zero difference', () => {
+  // Loan 10,500 with doc 500 entered as a single 10,000 disbursement: cash is right, shape is not.
+  const t = computeAmountFlowTally({
+    ...base,
+    records: { ...base.records, loanAmounts: 10500, documentCharges: 500 },
+    ledgerByType: { ...base.ledgerByType, LOAN_DISBURSEMENT: 10000 },
+    ledgerBalance: 42000,
+    runningBalance: 42000,
+    loans: [{ id: 7, borrower: 'Devi', amount: 10500, documentCharge: 500, disbursementTransactionDate: day, ledgerDisbursed: 10000 }],
+  });
+  assert.equal(t.difference, 0);
+  assert.equal(rowOf(t, 'loanDisbursements').difference, 500);
+  assert.equal(rowOf(t, 'documentCharges').difference, -500);
+  assert.deepEqual(t.loanDetails.map((l) => [l.id, l.difference]), [[7, 0]]);
 });
 
 test('other ledger entries (expense) get their own row with no records', () => {
@@ -132,7 +173,7 @@ test('the user\'s book: −2,300 from two double-counted and four old-style loan
   ];
   const t = computeAmountFlowTally({
     investedNet: 94624,
-    records: { contributions: 1451150, repayments: 357000, auctionPayouts: 1462800, loanCashGiven: 384000 },
+    records: { contributions: 1451150, repayments: 357000, auctionPayouts: 1462800, loanAmounts: 389700, documentCharges: 5700 },
     ledgerByType: { CHIT_CONTRIBUTION: 1451150, LOAN_REPAYMENT: 357000, AUCTION_PAYOUT: 1462800, LOAN_DISBURSEMENT: 388000, DOCUMENT_CHARGE: 1700, PARTNER_TO_PARTNER: 1553260 },
     ledgerBalance: 53674,
     runningBalance: 53674,
@@ -145,8 +186,10 @@ test('the user\'s book: −2,300 from two double-counted and four old-style loan
   assert.equal(t.recordsExpectedBalance, 55974);
   assert.equal(t.ledgerComputedBalance, 53674);
   assert.equal(t.difference, -2300);
-  assert.equal(rowOf(t, 'loanCashGiven').difference, -4000);
-  assert.equal(rowOf(t, 'documentCharges').difference, 1700);
+  // Records: 389,700 gross out (176,700 from the loans above + 213,000 from loans without a
+  // charge, not listed), 5,700 kept back: net 384,000 cash given.
+  assert.equal(rowOf(t, 'loanDisbursements').difference, 1700); // 16 and 20 were entered net
+  assert.equal(rowOf(t, 'documentCharges').difference, -4000); // 3, 5, 8, 10 have no charge entry
   assert.deepEqual(t.loanDetails.map((l) => [l.id, l.difference]), [[3, -1500], [5, -1000], [8, -500], [10, -1000], [16, 1000], [20, 700]]);
   assert.equal(t.loanDetails.reduce((s, l) => s + l.difference, 0), -2300);
 });

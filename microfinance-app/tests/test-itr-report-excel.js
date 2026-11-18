@@ -219,12 +219,13 @@ test('Summary: period, P&L totals, net profit, partner shares and cash equal the
 test('Summary warnings: each warning and the entries still to classify', async () => {
   const report = build(2025, 'FY');
   const codes = report.warnings.map((w) => w.code).sort();
-  assert.deepEqual(codes, ['DOCUMENT_CHARGE_LEDGER', 'NEGATIVE_CLOSING_CASH', 'NEGATIVE_OPENING_CASH', 'UNCLASSIFIED_ENTRIES']);
+  assert.deepEqual(codes, ['NEGATIVE_CLOSING_CASH', 'NEGATIVE_OPENING_CASH', 'UNCLASSIFIED_ENTRIES']);
   const ws = (await workbookOf(report, { unclassifiedCount: 7 })).getWorksheet('Summary');
   const unclassified = rowLabelled(ws, 'Unclassified manual entries');
   assert.equal(paise(money(unclassified.getCell(2))), paise(report.warnings.find((w) => w.code === 'UNCLASSIFIED_ENTRIES').amount));
   assert.match(text(unclassified.getCell(3)), /^2 manual entries in this period have no category/);
-  assert.ok(rowLabelled(ws, 'Document-charge ledger entries'));
+  // Document-charge ledger entries are ordinary cash (loans are recorded gross): no warning row.
+  assert.equal(rowsLabelled(ws, 'Document-charge ledger entries').length, 0);
   assert.equal(money(rowLabelled(ws, 'Negative opening cash').getCell(2)), report.cashFlow.opening);
   assert.equal(money(rowLabelled(ws, 'Negative closing cash').getCell(2)), report.cashFlow.closing);
   assert.ok(report.cashFlow.closing < 0);

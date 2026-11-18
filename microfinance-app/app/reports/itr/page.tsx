@@ -8,7 +8,6 @@
  * an Excel workbook for the accountant (GET /api/reports/itr/export, lib/itrReportExcel.ts).
  */
 import * as React from 'react';
-import Link from 'next/link';
 import { AlertTriangle, CalendarClock, ChevronRight, Download, Info, ReceiptText } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
@@ -234,19 +233,6 @@ function WarningList({
                 <a href="#classify-entries" className="font-medium text-foreground underline underline-offset-2 hover:no-underline">
                   Classify them below
                 </a>
-              </>
-            );
-            break;
-          case 'DOCUMENT_CHARGE_LEDGER':
-            body = (
-              <>
-                {w.count} document-charge ledger {w.count === 1 ? 'entry' : 'entries'} ({amount(w)}) {w.count === 1 ? 'is' : 'are'} under review. The charge is already kept
-                back from each loan, so these entries may count it twice. They are shown on their own cash line so the closing balance still matches the app&apos;s
-                Total balance; the profit &amp; loss takes the charge from the loans. {view(w, 'See the entries')}
-                {' · '}
-                <Link href="/dashboard" className="font-medium text-foreground underline underline-offset-2 hover:no-underline">
-                  Amount flow tally on the Dashboard
-                </Link>
               </>
             );
             break;
@@ -513,7 +499,8 @@ function TaxReport() {
                     Cash flow
                   </h2>
                   <p className="text-sm text-muted-foreground">
-                    {pooled ? 'Receipts and payments of this line of business; cash is pooled, so there is no opening or closing balance.' : 'From the cash ledger. Partner transfers move cash between partners and do not change the total.'}
+                    {pooled ? 'Receipts and payments of this line of business; cash is pooled, so there is no opening or closing balance.' : 'From the cash ledger. Partner transfers move cash between partners and do not change the total.'}{' '}
+                    {scope !== 'chits' ? 'Loans are shown gross: the full loan amount is paid out and the document charge kept back comes back in, so the two lines together are the cash the borrower received.' : null}
                   </p>
                 </div>
                 <StatementTable label="Cash flow" report={report} rows={cashRows} loading={!loaded} refreshing={refreshing} onOpen={setOpenLine} />

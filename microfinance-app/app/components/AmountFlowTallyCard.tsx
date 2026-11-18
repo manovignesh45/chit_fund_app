@@ -5,8 +5,9 @@
  *   Invested (net) + Cash inflow = Cash outflow + Total balance
  * by putting the business records next to the cash ledger. The headline shows the records'
  * expected balance against the ledger's Total balance (the Partner-wise balance panel's
- * figure); the breakdown shows every category and the loans whose ledger entries differ
- * from the cash the borrower got. Data: GET /dashboard/consolidated?action=amount-flow-tally.
+ * figure); the breakdown shows every category and the loans whose ledger entries are not the
+ * gross pair (full loan amount disbursed + document charge entered back).
+ * Data: GET /dashboard/consolidated?action=amount-flow-tally.
  */
 import * as React from 'react';
 import Link from 'next/link';
@@ -68,8 +69,8 @@ function TallyBody({ tally }: { tally: AmountFlowTally }) {
       <DescriptionList
         columns={4}
         items={[
-          { label: 'Money in', value: <Money value={tally.moneyIn.records} tone="plain" className="text-lg font-semibold" />, hint: 'Invested + cash inflow' },
-          { label: 'Money out', value: <Money value={tally.moneyOut.records} tone="plain" className="text-lg font-semibold" />, hint: 'Cash outflow' },
+          { label: 'Money in', value: <Money value={tally.moneyIn.records} tone="plain" className="text-lg font-semibold" />, hint: 'Invested + cash inflow + document charges kept back' },
+          { label: 'Money out', value: <Money value={tally.moneyOut.records} tone="plain" className="text-lg font-semibold" />, hint: 'Cash outflow, with loans at their full amount' },
           { label: 'Expected balance', value: <Money value={tally.recordsExpectedBalance} tone="auto" className="text-lg font-semibold" />, hint: 'Money in − money out' },
           { label: 'Actual balance (ledger)', value: <Money value={tally.ledgerBalance} tone="auto" className="text-lg font-semibold" />, hint: 'Total balance of all partners' },
           {
@@ -201,20 +202,24 @@ function CategoryTable({ tally }: { tally: AmountFlowTally }) {
         </table>
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
-        Difference is each row&apos;s effect on the balance: ledger − records for money in, records − ledger for money out. Document charges are
-        kept back from the loan, so they are not cash received; the cash given is the loan amount minus the charge.
+        Difference is each row&apos;s effect on the balance: ledger − records for money in, records − ledger for money out. Loans are recorded
+        gross: the full loan amount goes out and the document charge kept back comes back in, so together they equal the cash the borrower got.
       </p>
     </div>
   );
 }
 
+/** Expected ledger for a loan (gross): disbursed = loan amount, plus a document-charge entry = the charge. */
 function loanReason(loan: TallyLoanDetail): string {
   const parts: string[] = [];
+  const near = (a: number, b: number) => Math.abs(a - b) < 0.005;
   if (loan.ledgerDisbursed === null) parts.push('No disbursement entry in the ledger.');
-  else if (Math.abs(loan.ledgerDisbursed - loan.amount) < 0.005 && loan.documentCharge > 0)
-    parts.push('Ledger paid out the full amount, but the document charge was kept back.');
-  else if (Math.abs(loan.ledgerDisbursed - loan.cashGiven) >= 0.005) parts.push('Ledger disbursement differs from the cash given.');
-  if (loan.ledgerDocumentCharge !== null) parts.push('The document charge is also entered as cash received.');
+  else if (loan.documentCharge > 0 && near(loan.ledgerDisbursed, loan.cashGiven))
+    parts.push('Ledger disbursement is the cash given (amount − charge), not the full loan amount.');
+  else if (!near(loan.ledgerDisbursed, loan.amount)) parts.push('Ledger disbursement differs from the loan amount.');
+  if (loan.documentCharge > 0 && loan.ledgerDocumentCharge === null) parts.push('No document charge entry for the charge kept back.');
+  if (near(loan.difference, 0)) parts.push('The balance is not affected.');
+  else parts.push(loan.difference > 0 ? 'The ledger balance is too high by this amount.' : 'The ledger balance is too low by this amount.');
   return parts.join(' ');
 }
 
@@ -232,7 +237,7 @@ function LoanDrillDown({ loans: all }: { loans: TallyLoanDetail[] }) {
         Loans that differ{sorted.length ? ` (${sorted.length})` : ''}
       </h3>
       {!sorted.length ? (
-        <p className="text-sm text-muted-foreground">Every loan&apos;s ledger disbursement equals the cash given.</p>
+        <p className="text-sm text-muted-foreground">Every loan is in the ledger as the full amount disbursed plus its document charge entry.</p>
       ) : (
         <ul className="divide-y rounded-lg border">
           {loans.map((loan) => (

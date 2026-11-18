@@ -257,8 +257,9 @@ export async function getMemberTimeline(
       WHERE m."globalMemberId" = ${memberId} AND f."createdById" = ${userId} ${fundFilter}`);
   }
   if (loanSide && wantOut) {
-    // Cash handed over = amount − documentCharge, as the LOAN_DISBURSEMENT ledger entry records it
-    // (app/api/loans/consolidated/route.ts:1123).
+    // Cash handed over = amount − documentCharge: the charge is kept back from the loan. (The ledger
+    // records this gross, a LOAN_DISBURSEMENT of the full amount plus a DOCUMENT_CHARGE of the
+    // charge, which nets to the same cash; see createLoan in app/api/loans/consolidated/route.ts.)
     branches.push(Prisma.sql`
       SELECT 'loan_disbursed'::text, 2, l.id, l."disbursementDate", l.amount - COALESCE(l."documentCharge", 0), 'out'::text,
         NULL::int, l.id, NULL::text, NULL::int, l."loanType", l."repaymentType", NULL::text, l.purpose, p.name, l.amount, l."documentCharge"
